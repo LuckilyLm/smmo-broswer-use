@@ -190,3 +190,10 @@ data/
 *.pdf
 
 workflow
+
+# Local agent/development artifacts
+.claude/
+IMPLEMENTATION_PLAN.md
+
+# Generated runtime artifacts
+/artifacts
