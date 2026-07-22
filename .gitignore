@@ -197,3 +197,8 @@ IMPLEMENTATION_PLAN.md
 
 # Generated runtime artifacts
 /artifacts
+
+# Frontend generated artifacts
+web/saas-dashboard/node_modules/
+web/saas-dashboard/dist/
+web/saas-dashboard/tsconfig.tsbuildinfo

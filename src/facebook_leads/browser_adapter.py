@@ -29,6 +29,11 @@ def require_browser_cdp(env: Mapping[str, str] | None = None) -> str:
     return value
 
 
+def get_browser_window_size(env: Mapping[str, str] | None = None) -> tuple[int, int]:
+    source = env if env is not None else os.environ
+    return int(source.get("RESOLUTION_WIDTH", "1920")), int(source.get("RESOLUTION_HEIGHT", "1080"))
+
+
 async def get_active_page(browser_context: Any) -> Any:
     """Return the browser-use 0.1.48 agent current Playwright Page."""
 

@@ -90,6 +90,12 @@ def build_lead_report(scan_payload: dict[str, Any]) -> LeadScanReport:
         diagnostics={
             "scan_success": scan_payload.get("success"),
             "scan_stage": scan_payload.get("stage"),
+            "scan_status": scan_payload.get("status"),
+            "scan_partial": scan_payload.get("partial"),
+            "discovered_contents_count": scan_payload.get("discovered_contents_count"),
+            "content_success_count": scan_payload.get("content_success_count"),
+            "content_failure_count": scan_payload.get("content_failure_count"),
+            "content_skipped_count": scan_payload.get("content_skipped_count"),
             "read_only": True,
             "source_result_path": (scan_payload.get("diagnostics") or {}).get("result_path"),
         },
@@ -171,7 +177,7 @@ def render_lead_report_html(report: LeadScanReport) -> str:
         扫描评论：{report.scanned_comment_count} 条<br>
         候选线索：{report.lead_candidate_count} 条<br>
         高意向：{report.high_intent_count} 条　中等意向：{report.medium_intent_count} 条<br>
-        {_e(_llm_review_summary_text(report))}
+        {_llm_review_summary_html(report)}
       </div>
     </div>
     <div class="grid">
@@ -309,13 +315,17 @@ def _render_lead_card(lead: LeadCandidate) -> str:
     source_type_label = content_type_label(lead.source_content_type)
     evidence = _lead_evidence_text(lead)
     comment_link = _comment_link_html(lead)
+    score_breakdown = lead.score_breakdown or {}
     return f"""<div class="lead-card">
       <div class="lead-top"><strong>{author}</strong><span class="badge score-{_attr(lead.intent_level)}">{_e(level_label)} · {lead.intent_score}分</span></div>
       <div class="muted">{_e(lead.timestamp_text or "")}</div>
       <div class="comment">{_e(lead.comment_text or "")}</div>
       <div class="chips">匹配关键词：{matches}</div>
+      <div class="chips">原始命中：{_e(' / '.join(lead.raw_matched_keywords or [match.normalized_keyword for match in lead.matched_keywords]))}</div>
+      <div class="chips">有效命中：{_e(' / '.join(lead.effective_matched_keywords or [match.normalized_keyword for match in lead.matched_keywords]))}</div>
+      <div class="chips">已去重：{_e(' / '.join(lead.deduplicated_keywords or []))}</div>
       <div class="chips">意向类型：{categories}</div>
-      <p>规则判断：{_e(intent_level_label(lead.rule_intent_level or lead.intent_level))} · {lead.rule_intent_score if lead.rule_intent_score is not None else lead.intent_score}分</p>
+      <p>规则判断：{_e(intent_level_label(lead.rule_intent_level or lead.intent_level))} · {lead.rule_intent_score if lead.rule_intent_score is not None else lead.intent_score}分<br>去重后规则分：{_e(score_breakdown.get("total", lead.rule_intent_score if lead.rule_intent_score is not None else lead.intent_score))}<br>Score Breakdown：{_e(_score_breakdown_text(score_breakdown))}</p>
       <p>判断依据：{_e(evidence)}</p>
       {_ai_review_html(lead)}
       <p>来源内容：{_e(source_type_label)}</p>
@@ -422,6 +432,21 @@ def _llm_review_summary_text(report: LeadScanReport) -> str:
     return f"LLM 复核：失败，已全部回退规则判断　模型：{model}"
 
 
+def _llm_review_summary_html(report: LeadScanReport) -> str:
+    summary = report.llm_review or {}
+    if not summary.get("enabled"):
+        return _e(_llm_review_summary_text(report))
+    lines = [
+        _llm_review_summary_text(report),
+        f"LLM 模型：{summary.get('model') or '未记录'}",
+        f"Prompt：{summary.get('prompt_version') or '未记录'}",
+        f"调用：{int(summary.get('call_count') or 0)} 次",
+        f"Tokens：{_format_optional_number(summary.get('total_tokens'))}",
+        f"耗时：{_format_elapsed_seconds(summary.get('elapsed_ms'))}",
+    ]
+    return "<br>".join(_e(line) for line in lines)
+
+
 def _method_note(report: LeadScanReport) -> str:
     summary = report.llm_review or {}
     if not summary.get("enabled"):
@@ -446,6 +471,24 @@ def _llm_confidence(lead: LeadCandidate) -> float:
 
 def _format_confidence(value: float) -> str:
     return f"{round(value * 100)}%"
+
+
+def _format_optional_number(value: Any) -> str:
+    if value is None:
+        return "未返回"
+    try:
+        return str(int(value))
+    except (TypeError, ValueError):
+        return str(value)
+
+
+def _format_elapsed_seconds(value: Any) -> str:
+    if value is None:
+        return "未记录"
+    try:
+        return f"{float(value) / 1000:.1f} 秒"
+    except (TypeError, ValueError):
+        return str(value)
 
 
 def clean_comment_text(
@@ -543,6 +586,17 @@ def _lead_evidence_text(lead: LeadCandidate) -> str:
     if keywords:
         return f"命中关键词：{keywords}"
     return "命中购买意向规则"
+
+
+def _score_breakdown_text(score_breakdown: dict[str, Any]) -> str:
+    if not score_breakdown:
+        return ""
+    labels = {"strong_intent_bonus": "强意向加分", "total": "总分"}
+    parts = []
+    for key, value in score_breakdown.items():
+        label = labels.get(key, intent_category_label(key))
+        parts.append(f"{label}: {value}")
+    return " / ".join(parts)
 
 
 def _short(value: str | None, limit: int) -> str:

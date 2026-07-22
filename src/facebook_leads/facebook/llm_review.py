@@ -21,35 +21,21 @@ from .llm_models import (
 )
 
 
-SYSTEM_PROMPT = """你是一个社交媒体销售线索审核助手。
+LLM_REVIEW_PROMPT_VERSION = "phase4c2-v1"
+DEFAULT_LLM_MAX_BATCH_CHARS = 12000
 
-你需要判断用户评论是否表达真实购买或咨询意图。你会收到 Facebook 评论及本地规则命中结果。
+SYSTEM_PROMPT = """你是社交媒体销售线索审核助手。根据评论、内容上下文和本地规则结果判断：
+- 是否为真实销售潜客
+- 意向等级：high/medium/low/none
+- 意向类型：price/buy/delivery/location/contact/service/product/other
+- 中文原因、中文摘要、原语言简短建议回复、是否应该回复、风险标记
 
-任务：
-1. 判断是否是真实潜在客户
-2. 判断意向等级
-3. 判断意向类型
-4. 给出简短中文理由
-5. 根据评论原语言生成自然、简短、不冒犯的建议回复
+规则：不要因单个关键词强判潜客；不要编造价格、库存、地址、配送范围或服务能力；高风险内容 should_reply=false。
+长度：reason_zh 不超过40个中文字符；summary_zh 不超过30个中文字符；suggested_reply 1到2句话且不超过220字符。
+只输出严格 JSON，不要 Markdown，不要分析过程或推理过程。
 
-判断原则：
-- 高意向：明确询问价格、购买方式、配送、门店/地址、要求联系，或说明自己需要产品或服务
-- 中等意向：有兴趣但需求不完整，表达可能购买，仍需进一步确认
-- 低意向：泛泛询问、信息不完整、意图较弱
-- 非线索：纯聊天、玩笑、无关讨论、广告、垃圾信息，或只是提及关键词但没有购买意图
-
-要求：
-- 不因为出现单个关键词就强行判定为潜客
-- 结合上下文
-- 回复建议保持简短
-- 不承诺不存在的价格、库存、配送范围、地址或服务能力
-- 不编造业务事实
-- 信息不足时，建议回复应以询问或引导私聊为主
-- 回复使用评论用户主要语言；无法确定语言时使用英文
-- 只返回严格 JSON，不要 markdown，不要额外解释
-
-返回格式：
-{"results":[{"index":1,"is_lead":true,"confidence":0.95,"intent_level":"high","intent_types":["price"],"reason_zh":"用户明确询问价格。","summary_zh":"询问服务价格。","suggested_reply":"Hi! Thanks for your interest. Please send us a DM and we'll share the details with you.","reply_language":"en","should_reply":true,"risk_flags":[]}]}
+输出结构只用一次：
+{"results":[{"index":1,"is_lead":true,"confidence":0.95,"intent_level":"high","intent_types":["price"],"reason_zh":"用户明确询价。","summary_zh":"询问服务价格。","suggested_reply":"Hi! Please send us a DM for details.","reply_language":"en","should_reply":true,"risk_flags":[]}]}
 """
 
 
@@ -66,10 +52,11 @@ async def review_leads_with_llm(
     provider: str | None = None,
     base_url: str | None = None,
     api_key: str | None = None,
-    temperature: float = 0.1,
+    temperature: float = 0.0,
     max_retries: int = 2,
     concurrency: int | None = None,
     timeout_seconds: float | None = None,
+    max_batch_chars: int | None = None,
 ) -> list[ReviewedLeadCandidate]:
     if not leads:
         return []
@@ -91,6 +78,7 @@ async def review_leads_with_llm(
         max_retries=max_retries,
         concurrency=concurrency,
         timeout_seconds=timeout_seconds,
+        max_batch_chars=max_batch_chars,
     )
     return detailed["reviewed"]
 
@@ -104,14 +92,16 @@ async def review_leads_with_llm_detailed(
     provider: str | None = None,
     base_url: str | None = None,
     api_key: str | None = None,
-    temperature: float = 0.1,
+    temperature: float = 0.0,
     max_retries: int = 2,
     concurrency: int | None = None,
     timeout_seconds: float | None = None,
+    max_batch_chars: int | None = None,
 ) -> dict[str, Any]:
     started = time.perf_counter()
     concurrency = resolve_llm_concurrency(concurrency)
     timeout_seconds = resolve_llm_timeout_seconds(timeout_seconds)
+    max_batch_chars = resolve_llm_max_batch_chars(max_batch_chars)
     if batch_size < 1:
         raise ValueError("batch_size must be >= 1")
     if not leads:
@@ -122,6 +112,7 @@ async def review_leads_with_llm_detailed(
             batches=[],
             batch_size=batch_size,
             concurrency=concurrency,
+            max_batch_chars=max_batch_chars,
             elapsed_ms=0,
             prompt_tokens=None,
             completion_tokens=None,
@@ -135,7 +126,7 @@ async def review_leads_with_llm_detailed(
         api_key=api_key,
         temperature=temperature,
     )
-    batch_items = list(enumerate(_chunks(leads, batch_size), start=1))
+    batch_items = list(enumerate(build_llm_batches(leads, batch_size=batch_size, max_batch_chars=max_batch_chars), start=1))
     semaphore = asyncio.Semaphore(concurrency)
 
     async def run_one(batch_index: int, batch: list[LeadCandidate]) -> dict[str, Any]:
@@ -178,6 +169,7 @@ async def review_leads_with_llm_detailed(
         batches=batches,
         batch_size=batch_size,
         concurrency=concurrency,
+        max_batch_chars=max_batch_chars,
         elapsed_ms=elapsed,
         prompt_tokens=prompt_value,
         completion_tokens=completion_value,
@@ -191,6 +183,7 @@ async def review_leads_with_llm_detailed(
             "llm_completion_tokens": completion_value,
             "llm_total_tokens": total_value,
             "llm_batch_elapsed_ms_total": batch_elapsed_ms_total,
+            "llm_prompt_version": LLM_REVIEW_PROMPT_VERSION,
         },
         "diagnostics": {"batches": batches, "llm_call_count": len(batches), "summary": summary},
         "summary": summary,
@@ -219,13 +212,24 @@ def resolve_llm_timeout_seconds(value: float | None = None) -> float:
     return resolved
 
 
+def resolve_llm_max_batch_chars(value: int | None = None) -> int:
+    raw = value if value is not None else os.getenv("FACEBOOK_LEADS_LLM_MAX_BATCH_CHARS", str(DEFAULT_LLM_MAX_BATCH_CHARS))
+    try:
+        resolved = int(raw)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("LLM max batch chars must be an integer >= 1") from exc
+    if resolved < 1:
+        raise ValueError("LLM max batch chars must be >= 1")
+    return resolved
+
+
 def build_facebook_leads_llm_client(
     *,
     provider: str | None = None,
     model_name: str | None = None,
     base_url: str | None = None,
     api_key: str | None = None,
-    temperature: float = 0.1,
+    temperature: float = 0.0,
 ) -> Any:
     resolved_provider = provider or os.getenv("FACEBOOK_LEADS_LLM_PROVIDER") or os.getenv("DEFAULT_LLM", "openai")
     resolved_model = (
@@ -306,10 +310,13 @@ async def _review_batch(
     timeout_seconds: float = 120,
 ) -> dict[str, Any]:
     started = time.perf_counter()
-    payload = {"leads": [_lead_payload(index, lead) for index, lead in enumerate(leads, start=1)]}
+    payload = build_llm_prompt_payload(leads)
+    payload_text = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+    prompt_chars = len(SYSTEM_PROMPT) + len(payload_text)
+    prompt_estimated_tokens = estimate_prompt_tokens(prompt_chars)
     messages = [
         SystemMessage(content=SYSTEM_PROMPT),
-        HumanMessage(content=json.dumps(payload, ensure_ascii=False)),
+        HumanMessage(content=payload_text),
     ]
     attempts = 0
     last_error = ""
@@ -330,6 +337,10 @@ async def _review_batch(
                     "candidate_count": len(leads),
                     "batch_size": len(leads),
                     "model": model_name,
+                    "prompt_version": LLM_REVIEW_PROMPT_VERSION,
+                    "payload_chars": len(payload_text),
+                    "prompt_chars": prompt_chars,
+                    "prompt_estimated_tokens": prompt_estimated_tokens,
                     "elapsed_ms": elapsed,
                     "attempts": attempts,
                     "retry_count": attempts - 1,
@@ -368,6 +379,10 @@ async def _review_batch(
             "candidate_count": len(leads),
             "batch_size": len(leads),
             "model": model_name,
+            "prompt_version": LLM_REVIEW_PROMPT_VERSION,
+            "payload_chars": len(payload_text),
+            "prompt_chars": prompt_chars,
+            "prompt_estimated_tokens": prompt_estimated_tokens,
             "elapsed_ms": elapsed,
             "attempts": attempts,
             "retry_count": attempts - 1,
@@ -551,19 +566,52 @@ def _fallback_reviewed_lead(lead: LeadCandidate, review: LLMLeadReview) -> Revie
     return _reviewed_lead(lead, review)
 
 
+def build_llm_prompt_payload(leads: list[LeadCandidate]) -> dict[str, Any]:
+    return {"candidates": [_lead_payload(index, lead) for index, lead in enumerate(leads, start=1)]}
+
+
 def _lead_payload(index: int, lead: LeadCandidate) -> dict[str, Any]:
     return {
         "index": index,
-        "author_name": lead.author_name,
-        "comment_text": lead.comment_text,
-        "source_content_type": lead.source_content_type,
-        "source_content_preview": lead.source_text_preview,
-        "source_content_author": lead.source_author_name,
-        "rule_intent_score": lead.intent_score,
-        "rule_intent_level": lead.intent_level,
-        "rule_matched_keywords": _keyword_texts(lead.matched_keywords),
-        "rule_matched_categories": list(lead.matched_categories),
+        "id": str(index),
+        "author": lead.author_name,
+        "comment": lead.comment_text,
+        "content_type": lead.source_content_type,
+        "content": lead.source_text_preview,
+        "content_author": lead.source_author_name,
+        "rule_level": lead.intent_level,
+        "rule_types": [category.lower() for category in lead.matched_categories],
+        "keywords": _keyword_texts(lead.matched_keywords),
     }
+
+
+def build_llm_batches(
+    leads: list[LeadCandidate],
+    *,
+    batch_size: int,
+    max_batch_chars: int,
+) -> list[list[LeadCandidate]]:
+    if batch_size < 1:
+        raise ValueError("batch_size must be >= 1")
+    if max_batch_chars < 1:
+        raise ValueError("LLM max batch chars must be >= 1")
+    batches: list[list[LeadCandidate]] = []
+    current: list[LeadCandidate] = []
+    for lead in leads:
+        candidate = current + [lead]
+        candidate_chars = len(json.dumps(build_llm_prompt_payload(candidate), ensure_ascii=False, separators=(",", ":")))
+        if current and (len(current) >= batch_size or candidate_chars > max_batch_chars):
+            batches.append(current)
+            current = [lead]
+        else:
+            current = candidate
+    if current:
+        batches.append(current)
+    return batches
+
+
+def estimate_prompt_tokens(chars: int) -> int:
+    return max(1, int((chars + 3) / 4)) if chars > 0 else 0
 
 
 def _keyword_texts(matches: list[IntentMatch]) -> list[str]:
@@ -617,11 +665,14 @@ def build_llm_review_summary(
     prompt_tokens: int | None,
     completion_tokens: int | None,
     total_tokens: int | None,
+    max_batch_chars: int | None = None,
 ) -> dict[str, Any]:
+    tokens_per_candidate = round(total_tokens / candidate_count, 2) if total_tokens is not None and candidate_count else None
     if not enabled:
         return {
             "enabled": False,
             "status": "disabled",
+            "prompt_version": LLM_REVIEW_PROMPT_VERSION,
             "model": model,
             "candidate_count": candidate_count,
             "reviewed_count": 0,
@@ -633,10 +684,12 @@ def build_llm_review_summary(
             "call_count": 0,
             "batch_size": batch_size,
             "concurrency": concurrency,
+            "max_batch_chars": max_batch_chars,
             "elapsed_ms": elapsed_ms,
             "prompt_tokens": prompt_tokens,
             "completion_tokens": completion_tokens,
             "total_tokens": total_tokens,
+            "tokens_per_candidate": tokens_per_candidate,
         }
     item_statuses = [
         status
@@ -662,6 +715,7 @@ def build_llm_review_summary(
     return {
         "enabled": True,
         "status": status,
+        "prompt_version": LLM_REVIEW_PROMPT_VERSION,
         "model": model,
         "candidate_count": candidate_count,
         "reviewed_count": success_count,
@@ -673,10 +727,12 @@ def build_llm_review_summary(
         "call_count": len(batches),
         "batch_size": batch_size,
         "concurrency": concurrency,
+        "max_batch_chars": max_batch_chars,
         "elapsed_ms": elapsed_ms,
         "prompt_tokens": prompt_tokens,
         "completion_tokens": completion_tokens,
         "total_tokens": total_tokens,
+        "tokens_per_candidate": tokens_per_candidate,
     }
 
 

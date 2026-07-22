@@ -68,8 +68,8 @@ async def run_single_browser_task(
     # --- Browser Setup ---
     # These should ideally come from the main agent's config
     headless = browser_config.get("headless", False)
-    window_w = browser_config.get("window_width", 1280)
-    window_h = browser_config.get("window_height", 1100)
+    window_w = browser_config.get("window_width", int(os.getenv("RESOLUTION_WIDTH", "1920")))
+    window_h = browser_config.get("window_height", int(os.getenv("RESOLUTION_HEIGHT", "1080")))
     browser_user_data_dir = browser_config.get("user_data_dir", None)
     use_own_browser = browser_config.get("use_own_browser", False)
     browser_binary_path = browser_config.get("browser_binary_path", None)

@@ -70,6 +70,7 @@ class CustomBrowser(Browser):
             *(CHROME_HEADLESS_ARGS if self.config.headless else []),
             *(CHROME_DISABLE_SECURITY_ARGS if self.config.disable_security else []),
             *(CHROME_DETERMINISTIC_RENDERING_ARGS if self.config.deterministic_rendering else []),
+            '--start-maximized',
             f'--window-position={offset_x},{offset_y}',
             f'--window-size={screen_size["width"]},{screen_size["height"]}',
             *self.config.extra_browser_args,

@@ -54,14 +54,27 @@ class FacebookScanResult:
     diagnostics: dict[str, Any] = field(default_factory=dict)
     error_type: str | None = None
     error: str | None = None
+    status: str | None = None
+    partial: bool = False
+    discovered_contents: list[FacebookContentCandidate] = field(default_factory=list)
+    content_success_count: int = 0
+    content_failure_count: int = 0
+    content_skipped_count: int = 0
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "success": self.success,
+            "status": self.status or ("partial" if self.partial else ("completed" if self.success else "failed")),
+            "partial": self.partial,
             "stage": self.stage,
             "keyword": self.keyword,
             "login_state": self.login_state,
             "active_page_url": self.active_page_url,
+            "discovered_contents_count": len(self.discovered_contents or self.contents),
+            "discovered_contents": [item.to_dict() for item in (self.discovered_contents or self.contents)],
+            "content_success_count": self.content_success_count or len(self.contents),
+            "content_failure_count": self.content_failure_count,
+            "content_skipped_count": self.content_skipped_count,
             "contents": [item.to_dict() for item in self.contents],
             "comments": [item.to_dict() for item in self.comments],
             "timing": self.timing,

@@ -11,6 +11,56 @@ This project builds upon the foundation of the [browser-use](https://github.com/
 
 We would like to officially thank [WarmShao](https://github.com/warmshao) for his contribution to this project.
 
+## Facebook Leads SaaS
+
+The repository includes a multi-tenant Facebook lead discovery service under `src/facebook_leads/saas` and a React dashboard under `web/saas-dashboard`. Campaign runs are asynchronous: the API enqueues an execution, the scheduler creates scheduled executions, and workers process enabled keywords in priority order.
+
+Safety is fixed for this phase: every scheduler and worker execution uses `send_disabled=true`. The system may scan, analyze, build a reply plan, and persist leads, but it does not execute the plan or send a Facebook reply.
+
+### Local setup
+
+1. Copy `.env.example` to `.env`, set `POSTGRES_PASSWORD`, and optionally set `DATABASE_URL` explicitly.
+2. Start PostgreSQL:
+
+   ```powershell
+   docker compose -f docker-compose.saas.yml up -d
+   ```
+
+3. Apply all Alembic migrations and seed the demo tenant:
+
+   ```powershell
+   py scripts\saas_migrate.py
+   py scripts\saas_seed_demo.py
+   ```
+
+4. Start the API, scheduler, and one worker together for development. This runner also applies pending migrations before starting:
+
+   ```powershell
+   py scripts\saas_dev_runner.py
+   ```
+
+5. Start the dashboard in another terminal:
+
+   ```powershell
+   cd web\saas-dashboard
+   npm install
+   npm run dev
+   ```
+
+The dashboard is available at `http://127.0.0.1:5173`; the API listens on `http://127.0.0.1:8000`. Set `SAAS_CHROME_EXECUTABLE` when Chrome cannot be discovered automatically. Each connected platform account receives a separate profile and CDP port from the configured `SAAS_BROWSER_CDP_PORT_START` to `SAAS_BROWSER_CDP_PORT_END` range.
+
+Browser sessions use an HttpOnly, SameSite cookie; Bearer tokens remain supported for API clients. Set `SAAS_COOKIE_SECURE=true` when the API is served over HTTPS.
+
+For production, run the processes separately after `py scripts\saas_migrate.py`:
+
+```powershell
+py -m uvicorn src.facebook_leads.saas.api:app --host 127.0.0.1 --port 8000
+py scripts\saas_scheduler.py
+py scripts\saas_worker.py --worker-id worker-1
+```
+
+Use `py scripts\saas_smoke.py --sqlite-temp` for a fixture-only smoke test. It does not connect to Facebook or send a reply. PostgreSQL integration tests require `TEST_DATABASE_URL`.
+
 **WebUI:** is built on Gradio and supports most of `browser-use` functionalities. This UI is designed to be user-friendly and enables easy interaction with the browser agent.
 
 **Expanded LLM Support:** We've integrated support for various Large Language Models (LLMs), including: Google, OpenAI, Azure OpenAI, Anthropic, DeepSeek, Ollama etc. And we plan to add support for even more models in the future.

@@ -32,6 +32,7 @@ from src.facebook_leads.facebook.llm_review import (  # noqa: E402
     build_llm_review_summary,
     review_leads_with_llm_detailed,
     resolve_llm_concurrency,
+    resolve_llm_max_batch_chars,
     resolve_llm_timeout_seconds,
 )
 
@@ -43,6 +44,7 @@ async def run_lead_scan(args: argparse.Namespace) -> dict:
         llm_client = build_facebook_leads_llm_client(model_name=args.llm_model)
     llm_concurrency = resolve_llm_concurrency(getattr(args, "llm_concurrency", None)) if args.llm_review else None
     llm_timeout_seconds = resolve_llm_timeout_seconds(getattr(args, "llm_timeout_seconds", None)) if args.llm_review else None
+    llm_max_batch_chars = resolve_llm_max_batch_chars(getattr(args, "llm_max_batch_chars", None)) if args.llm_review else None
     readonly_args = argparse.Namespace(
         keyword=args.keyword,
         content_limit=args.content_limit,
@@ -65,6 +67,7 @@ async def run_lead_scan(args: argparse.Namespace) -> dict:
             model_name=args.llm_model,
             concurrency=llm_concurrency,
             timeout_seconds=llm_timeout_seconds,
+            max_batch_chars=llm_max_batch_chars,
         )
         reviewed_leads = apply_review_to_leads(all_leads, llm_review_payload["reviewed"])
         lead_index = 0
@@ -82,6 +85,7 @@ async def run_lead_scan(args: argparse.Namespace) -> dict:
             batches=[],
             batch_size=args.llm_batch_size,
             concurrency=None,
+            max_batch_chars=getattr(args, "llm_max_batch_chars", None),
             elapsed_ms=0,
             prompt_tokens=None,
             completion_tokens=None,
@@ -132,6 +136,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--llm-model", default=None, help="Temporary model override for Facebook Leads LLM review.")
     parser.add_argument("--llm-concurrency", type=int, default=None)
     parser.add_argument("--llm-timeout-seconds", type=float, default=None)
+    parser.add_argument("--llm-max-batch-chars", type=int, default=None)
     parser.add_argument(
         "--current-page-only",
         action="store_true",

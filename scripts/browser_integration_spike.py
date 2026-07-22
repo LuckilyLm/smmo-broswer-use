@@ -13,6 +13,7 @@ if str(PROJECT_ROOT) not in sys.path:
 from src.facebook_leads.browser_adapter import (
     BrowserCdpNotConfiguredError,
     get_active_page,
+    get_browser_window_size,
     require_browser_cdp,
     summarize_pages,
     verify_page_primitives,
@@ -21,6 +22,7 @@ from src.facebook_leads.browser_adapter import (
 
 async def run_spike(goto_url: str | None = None) -> dict:
     cdp_url = require_browser_cdp()
+    window_w, window_h = get_browser_window_size()
     from browser_use.browser.browser import BrowserConfig
     from browser_use.browser.context import BrowserContextConfig
     from src.browser.custom_browser import CustomBrowser
@@ -30,11 +32,11 @@ async def run_spike(goto_url: str | None = None) -> dict:
             cdp_url=cdp_url,
             headless=False,
             keep_alive=True,
-            new_context_config=BrowserContextConfig(keep_alive=True),
+            new_context_config=BrowserContextConfig(keep_alive=True, window_width=window_w, window_height=window_h),
         )
     )
     browser_context = await browser.new_context(
-        BrowserContextConfig(keep_alive=True, force_new_context=False)
+        BrowserContextConfig(keep_alive=True, force_new_context=False, window_width=window_w, window_height=window_h)
     )
 
     page = await get_active_page(browser_context)

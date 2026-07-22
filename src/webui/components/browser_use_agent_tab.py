@@ -388,8 +388,8 @@ async def run_agent_task(
     keep_browser_open = get_browser_setting("keep_browser_open", False)
     headless = get_browser_setting("headless", False)
     disable_security = get_browser_setting("disable_security", False)
-    window_w = int(get_browser_setting("window_w", 1280))
-    window_h = int(get_browser_setting("window_h", 1100))
+    window_w = int(get_browser_setting("window_w", os.getenv("RESOLUTION_WIDTH", "1920")))
+    window_h = int(get_browser_setting("window_h", os.getenv("RESOLUTION_HEIGHT", "1080")))
     cdp_url = get_browser_setting("cdp_url") or None
     wss_url = get_browser_setting("wss_url") or None
     save_recording_path = get_browser_setting("save_recording_path") or None

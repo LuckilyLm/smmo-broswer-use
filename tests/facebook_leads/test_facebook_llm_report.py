@@ -9,6 +9,7 @@ import scripts.facebook_lead_scan as lead_scan
 import scripts.facebook_reply_one as reply_cli
 from src.facebook_leads.facebook.llm_models import failed_review
 from src.facebook_leads.facebook.llm_review import (
+    LLM_REVIEW_PROMPT_VERSION,
     apply_review_to_leads,
     build_llm_review_summary,
     review_leads_with_llm_detailed,
@@ -83,8 +84,15 @@ def test_success_report_summary_is_serialized_and_rendered():
     assert data["llm_review"]["status"] == "success"
     assert data["llm_review"]["concurrency"] == 2
     assert data["llm_review"]["total_tokens"] == 15
+    assert data["llm_review"]["tokens_per_candidate"] == 5.0
+    assert data["llm_review"]["prompt_version"] == LLM_REVIEW_PROMPT_VERSION
     assert "LLM 复核：已完成" in html
     assert "模型：fake-model" in html
+    assert "LLM 模型：fake-model" in html
+    assert f"Prompt：{LLM_REVIEW_PROMPT_VERSION}" in html
+    assert "调用：1 次" in html
+    assert "Tokens：15" in html
+    assert "耗时：0.1 秒" in html
     assert "本次未启用大语言模型复核" not in html
 
 
@@ -169,7 +177,10 @@ def test_lead_scan_llm_review_uses_batches(monkeypatch, tmp_path):
             "diagnostics": {"artifact_dir": str(artifact_dir), "result_path": str(artifact_dir / "result.json")},
         }
 
+    captured_kwargs = {}
+
     async def fake_review(leads, **kwargs):
+        captured_kwargs.update(kwargs)
         result = await review_leads_with_llm_detailed(
             leads,
             llm_client=FakeLLM([review_response(2), review_response(1)]),
@@ -193,6 +204,9 @@ def test_lead_scan_llm_review_uses_batches(monkeypatch, tmp_path):
                 llm_review=True,
                 llm_batch_size=2,
                 llm_model="fake-model",
+                llm_concurrency=3,
+                llm_timeout_seconds=45,
+                llm_max_batch_chars=1000,
                 llm_client=FakeLLM([]),
             )
         )
@@ -201,6 +215,9 @@ def test_lead_scan_llm_review_uses_batches(monkeypatch, tmp_path):
     assert payload["diagnostics"]["llm_called"] is True
     assert payload["diagnostics"]["llm_review"]["llm_call_count"] == 2
     assert payload["lead_report"]["contents"][0]["leads"][0]["llm_review"]["status"] == "success"
+    assert captured_kwargs["concurrency"] == 3
+    assert captured_kwargs["timeout_seconds"] == 45
+    assert captured_kwargs["max_batch_chars"] == 1000
 
 
 def test_use_suggested_reply_reads_report_value(tmp_path):

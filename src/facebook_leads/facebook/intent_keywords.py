@@ -2,9 +2,11 @@ from __future__ import annotations
 
 
 CATEGORY_WEIGHTS = {
-    "PRICE": 3,
-    "BUY": 4,
+    "PRICE": 5,
+    "BUY": 5,
     "DELIVERY": 4,
+    "AVAILABILITY": 4,
+    "PRODUCT_INFO": 2,
     "LOCATION": 2,
     "CONTACT": 3,
 }
@@ -53,6 +55,29 @@ INTENT_KEYWORDS = {
         "id": ["kirim", "pengiriman"],
         "ms": ["penghantaran", "hantar"],
     },
+    "AVAILABILITY": {
+        "en": [
+            "available",
+            "still available",
+            "is it available",
+            "is this available",
+            "avail",
+            "in stock",
+            "stock available",
+            "available now",
+        ],
+        "zh": ["有货", "现货", "还有吗", "还有货吗", "库存"],
+        "fil": ["available pa", "available pa po", "still available", "avail"],
+        "id": ["tersedia", "stok tersedia", "masih ada"],
+        "ms": ["ada stok", "masih ada"],
+    },
+    "PRODUCT_INFO": {
+        "en": ["what brand", "brand new", "which model", "what model", "model", "brand"],
+        "zh": ["什么品牌", "哪个型号", "什么型号", "全新吗", "品牌"],
+        "fil": ["what brand", "brand new po", "anong brand"],
+        "id": ["merek apa", "model apa"],
+        "ms": ["jenama apa", "model apa"],
+    },
     "LOCATION": {
         "en": [
             "where are you located",
@@ -80,6 +105,11 @@ STRONG_INTENT_PHRASES = {
     "i need one",
     "do you deliver",
     "do you ship",
+    "still available",
+    "is it available",
+    "is this available",
+    "available pa",
+    "available pa po",
     "count me in",
     "magkano",
     "多少钱",

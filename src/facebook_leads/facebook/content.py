@@ -5,7 +5,35 @@ import time
 
 async def open_content(page, url: str, timeout_ms: int = 30000) -> dict:
     started = time.perf_counter()
-    await page.goto(url, wait_until="domcontentloaded", timeout=timeout_ms)
+    attempts = []
+    for attempt in range(1, 3):
+        try:
+            await page.goto(url, wait_until="domcontentloaded", timeout=timeout_ms)
+            attempts.append({"attempt": attempt, "status": "goto_success"})
+            break
+        except Exception as exc:
+            readiness = await evaluate_page_readiness(page)
+            attempts.append(
+                {
+                    "attempt": attempt,
+                    "status": "goto_timeout_or_error",
+                    "error_type": type(exc).__name__,
+                    "error_message": str(exc),
+                    "readiness": readiness,
+                }
+            )
+            if readiness.get("status") in {"ready", "degraded"}:
+                return await _open_success_payload(page, url, started, attempts, "navigation_degraded_success")
+            if attempt >= 2:
+                raise
+            try:
+                await page.wait_for_timeout(1000)
+            except Exception:
+                pass
+    return await _open_success_payload(page, url, started, attempts, "navigation_success")
+
+
+async def _open_success_payload(page, url: str, started: float, attempts: list[dict], navigation_status: str) -> dict:
     try:
         await page.wait_for_load_state("networkidle", timeout=5000)
     except Exception:
@@ -16,8 +44,26 @@ async def open_content(page, url: str, timeout_ms: int = 30000) -> dict:
         "final_url": getattr(page, "url", None),
         "redirected": bool(getattr(page, "url", None) and getattr(page, "url", None) != url),
         "ready": ready,
+        "navigation_status": navigation_status,
+        "attempt_count": len(attempts),
+        "attempts": attempts,
         "elapsed_ms": int((time.perf_counter() - started) * 1000),
     }
+
+
+async def evaluate_page_readiness(page) -> dict:
+    summary = await _content_ready_summary(page)
+    if summary.get("body_present") and not summary.get("is_search_page") and (
+        summary.get("has_reel_viewer")
+        or summary.get("has_post_article")
+        or summary.get("comment_button_count", 0) > 0
+    ):
+        return {"status": "ready", **summary}
+    if summary.get("body_present") and not summary.get("is_search_page") and (
+        summary.get("title") or summary.get("url")
+    ):
+        return {"status": "degraded", **summary}
+    return {"status": "not_ready", **summary}
 
 
 async def wait_for_facebook_content_ready(page, timeout_ms: int = 10000) -> dict:

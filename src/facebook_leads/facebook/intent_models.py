@@ -44,6 +44,10 @@ class LeadCandidate:
     intent_level: LeadIntentLevel
     matched_keywords: list[IntentMatch] = field(default_factory=list)
     matched_categories: list[str] = field(default_factory=list)
+    raw_matched_keywords: list[str] = field(default_factory=list)
+    effective_matched_keywords: list[str] = field(default_factory=list)
+    deduplicated_keywords: list[str] = field(default_factory=list)
+    score_breakdown: dict[str, Any] = field(default_factory=dict)
     reasons: list[str] = field(default_factory=list)
     is_false_positive: bool = False
     false_positive_reason: str | None = None

@@ -107,5 +107,61 @@ def test_false_positive_price_context_is_downgraded():
     assert lead.intent_level == "low"
 
 
+def test_availability_queries_are_lead_candidates():
+    for text in ["Available pa po?", "Still available?", "is it still available?", "Is it avail?", "in stock?"]:
+        lead = classify(text)
+
+        assert lead is not None
+        assert "AVAILABILITY" in lead.matched_categories
+        assert lead.intent_level in {"medium", "high"}
+
+
+def test_availability_synonyms_are_deduplicated_to_specific_phrase():
+    lead = classify("Available pa po?")
+
+    assert len(lead.raw_matched_keywords) >= 3
+    assert lead.effective_matched_keywords == ["available pa po"]
+    assert set(lead.deduplicated_keywords) >= {"available", "available pa"}
+    assert lead.score_breakdown["AVAILABILITY"] == 4
+    assert lead.score_breakdown["total"] == 6
+
+
+def test_still_available_prefers_specific_phrase():
+    lead = classify("Still available?")
+
+    assert "available" in lead.raw_matched_keywords
+    assert lead.effective_matched_keywords == ["still available"]
+    assert lead.score_breakdown["total"] == 6
+
+
+def test_product_info_queries_are_lead_candidates():
+    for text in ["What brand?", "brand new po ba?", "Which model?", "What model?"]:
+        lead = classify(text)
+
+        assert lead is not None
+        assert "PRODUCT_INFO" in lead.matched_categories
+
+
+def test_product_info_deduplicates_brand_phrase():
+    lead = classify("What brand?")
+
+    assert set(lead.raw_matched_keywords) >= {"what brand", "brand"}
+    assert lead.effective_matched_keywords == ["what brand"]
+    assert lead.score_breakdown["PRODUCT_INFO"] == 2
+
+
+def test_praise_noise_still_not_leads():
+    for text in ["Wow", "Gorgeous", "very nice", "I love you", "looks great"]:
+        assert classify(text) is None
+
+
+def test_cross_category_matches_still_stack():
+    lead = classify("Price and delivery?")
+
+    assert set(lead.matched_categories) >= {"PRICE", "DELIVERY"}
+    assert lead.score_breakdown["PRICE"] == 5
+    assert lead.score_breakdown["DELIVERY"] == 4
+
+
 def test_normalize_comment_text_compacts_unicode_and_spaces():
     assert normalize_comment_text("  Price\u2019s   OK? ") == "price's ok?"

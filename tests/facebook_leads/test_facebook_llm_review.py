@@ -5,7 +5,12 @@ import pytest
 
 from src.facebook_leads.facebook.intent import LeadIntentClassifier
 from src.facebook_leads.facebook.llm_review import (
+    LLM_REVIEW_PROMPT_VERSION,
+    SYSTEM_PROMPT,
+    build_llm_batches,
+    build_llm_prompt_payload,
     resolve_llm_concurrency,
+    resolve_llm_max_batch_chars,
     resolve_llm_timeout_seconds,
     review_leads_with_llm_detailed,
 )
@@ -127,6 +132,31 @@ def test_multi_batch_review_respects_batch_size():
     assert [batch["batch_size"] for batch in result["diagnostics"]["batches"]] == [2, 1]
 
 
+def test_prompt_payload_keeps_required_fields_and_omits_urls_and_diagnostics():
+    payload = build_llm_prompt_payload([make_lead()])
+    candidate = payload["candidates"][0]
+    serialized = json.dumps(payload, ensure_ascii=False)
+
+    assert candidate["comment"] == "How much for BMW 218I?"
+    assert candidate["content"] == "Car detailing promo"
+    assert candidate["rule_level"] == "medium"
+    assert candidate["keywords"]
+    assert "facebook.com" not in serialized
+    assert "comment_url" not in serialized
+    assert "direct_comment_url" not in serialized
+    assert "author_url" not in serialized
+    assert "locator" not in serialized
+    assert "diagnostics" not in serialized
+
+
+def test_system_prompt_has_single_schema_and_output_length_limits():
+    assert SYSTEM_PROMPT.count('"results"') == 1
+    assert "reason_zh 不超过40个中文字符" in SYSTEM_PROMPT
+    assert "summary_zh 不超过30个中文字符" in SYSTEM_PROMPT
+    assert "suggested_reply 1到2句话且不超过220字符" in SYSTEM_PROMPT
+    assert "不要 Markdown" in SYSTEM_PROMPT
+
+
 def test_invalid_json_retries_then_succeeds():
     llm = FakeLLM([FakeMessage("{not-json"), review_response(1)])
 
@@ -179,6 +209,21 @@ def test_concurrency_two_allows_two_batches_and_preserves_order():
 
     assert llm.max_active == 2
     assert [item.lead.comment_fingerprint for item in result["reviewed"]] == ["fp1", "fp2"]
+
+
+def test_max_batch_chars_splits_before_batch_size():
+    leads = [make_lead(1), make_lead(2), make_lead(3)]
+    one_payload_chars = len(json.dumps(build_llm_prompt_payload([leads[0]]), ensure_ascii=False, separators=(",", ":")))
+
+    batches = build_llm_batches(leads, batch_size=10, max_batch_chars=one_payload_chars + 10)
+
+    assert [len(batch) for batch in batches] == [1, 1, 1]
+
+
+def test_single_candidate_over_max_batch_chars_still_gets_batch():
+    batches = build_llm_batches([make_lead()], batch_size=10, max_batch_chars=1)
+
+    assert [len(batch) for batch in batches] == [1]
 
 
 def test_one_success_one_timeout_makes_partial_summary():
@@ -254,6 +299,28 @@ def test_usage_missing_keeps_token_totals_null():
     assert result["summary"]["total_tokens"] is None
 
 
+def test_batch_diagnostics_include_prompt_stats_and_prompt_version():
+    llm = FakeLLM([review_response(1)])
+
+    result = asyncio.run(review_leads_with_llm_detailed([make_lead()], llm_client=llm, batch_size=1))
+    batch = result["diagnostics"]["batches"][0]
+
+    assert batch["prompt_version"] == LLM_REVIEW_PROMPT_VERSION
+    assert batch["payload_chars"] > 0
+    assert batch["prompt_chars"] >= batch["payload_chars"]
+    assert batch["prompt_estimated_tokens"] > 0
+    assert result["summary"]["prompt_version"] == LLM_REVIEW_PROMPT_VERSION
+
+
+def test_tokens_per_candidate_is_calculated_from_actual_usage():
+    llm = FakeLLM([review_response(2)])
+
+    result = asyncio.run(review_leads_with_llm_detailed([make_lead(1), make_lead(2)], llm_client=llm, batch_size=2))
+
+    assert result["summary"]["total_tokens"] == 15
+    assert result["summary"]["tokens_per_candidate"] == 7.5
+
+
 def test_llm_concurrency_prefers_cli_over_env(monkeypatch):
     monkeypatch.setenv("FACEBOOK_LEADS_LLM_CONCURRENCY", "5")
 
@@ -282,3 +349,18 @@ def test_llm_timeout_reads_env_and_validates(monkeypatch):
     monkeypatch.setenv("FACEBOOK_LEADS_LLM_TIMEOUT_SECONDS", "0")
     with pytest.raises(ValueError, match="timeout"):
         resolve_llm_timeout_seconds()
+
+
+def test_llm_max_batch_chars_prefers_cli_over_env(monkeypatch):
+    monkeypatch.setenv("FACEBOOK_LEADS_LLM_MAX_BATCH_CHARS", "5000")
+
+    assert resolve_llm_max_batch_chars(1000) == 1000
+
+
+def test_llm_max_batch_chars_reads_env_and_validates(monkeypatch):
+    monkeypatch.setenv("FACEBOOK_LEADS_LLM_MAX_BATCH_CHARS", "3000")
+    assert resolve_llm_max_batch_chars() == 3000
+
+    monkeypatch.setenv("FACEBOOK_LEADS_LLM_MAX_BATCH_CHARS", "0")
+    with pytest.raises(ValueError, match="max batch chars"):
+        resolve_llm_max_batch_chars()

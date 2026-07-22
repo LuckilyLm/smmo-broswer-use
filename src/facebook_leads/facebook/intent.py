@@ -35,9 +35,11 @@ class LeadIntentClassifier:
         source_metadata = source_metadata or {}
         text = comment.text or ""
         normalized_text = normalize_comment_text(text)
-        matches = self._match_keywords(normalized_text)
-        if not matches:
+        raw_matches = self._match_keywords(normalized_text)
+        if not raw_matches:
             return None
+        resolution = resolve_keyword_matches(raw_matches)
+        matches = resolution["effective_matches"]
 
         categories = sorted({match.category for match in matches})
         score = sum(match.weight for match in matches)
@@ -46,16 +48,15 @@ class LeadIntentClassifier:
         if false_positive:
             score = min(score, 1)
             reasons.append(false_positive_reason or "possible false positive")
-        strong_hits = sorted(
-            {
-                match.normalized_keyword
-                for match in matches
-                if match.normalized_keyword in STRONG_INTENT_PHRASES
-            }
-        )
+        strong_hits = _strong_intent_hits(normalized_text, matches)
+        strong_bonus = min(2 * len({match.category for match in strong_hits}), 2 * len(categories))
         if strong_hits and not false_positive:
-            score += 2
-            reasons.append("strong intent phrase: " + ", ".join(strong_hits))
+            score += strong_bonus
+            reasons.append("strong intent phrase: " + ", ".join(match.normalized_keyword for match in strong_hits))
+        score_breakdown = {match.category: match.weight for match in matches}
+        if strong_bonus:
+            score_breakdown["strong_intent_bonus"] = strong_bonus
+        score_breakdown["total"] = score
 
         level = score_to_level(score)
         if level == "none":
@@ -82,6 +83,10 @@ class LeadIntentClassifier:
             intent_level=level,
             matched_keywords=matches,
             matched_categories=categories,
+            raw_matched_keywords=[match.normalized_keyword for match in raw_matches],
+            effective_matched_keywords=[match.normalized_keyword for match in matches],
+            deduplicated_keywords=[match.normalized_keyword for match in resolution["deduplicated_matches"]],
+            score_breakdown=score_breakdown,
             reasons=reasons,
             is_false_positive=false_positive,
             false_positive_reason=false_positive_reason,
@@ -146,6 +151,53 @@ def score_to_level(score: int) -> LeadIntentLevel:
     if score >= 1:
         return "low"
     return "none"
+
+
+def resolve_keyword_matches(matches: list[IntentMatch]) -> dict[str, list[IntentMatch]]:
+    effective: list[IntentMatch] = []
+    deduplicated: list[IntentMatch] = []
+    by_category: dict[str, list[tuple[int, IntentMatch]]] = {}
+    for index, match in enumerate(matches):
+        by_category.setdefault(match.category, []).append((index, match))
+
+    for _category, grouped in by_category.items():
+        selected_indexes: set[int] = set()
+        for index, match in grouped:
+            if any(
+                other_index != index and _keyword_contains(other.normalized_keyword, match.normalized_keyword)
+                for other_index, other in grouped
+            ):
+                deduplicated.append(match)
+                continue
+            selected_indexes.add(index)
+        if not selected_indexes and grouped:
+            selected = sorted(
+                grouped,
+                key=lambda item: (-len(item[1].normalized_keyword), -item[1].weight, item[0]),
+            )[0][0]
+            selected_indexes.add(selected)
+        effective.extend(match for index, match in grouped if index in selected_indexes)
+    return {"raw_matches": matches, "effective_matches": effective, "deduplicated_matches": deduplicated}
+
+
+def _strong_intent_hits(normalized_text: str, matches: list[IntentMatch]) -> list[IntentMatch]:
+    hits = []
+    seen_categories: set[str] = set()
+    for match in matches:
+        if match.category in seen_categories:
+            continue
+        if any(_keyword_contains(match.normalized_keyword, phrase) or _keyword_contains(phrase, match.normalized_keyword) for phrase in STRONG_INTENT_PHRASES if phrase in normalized_text):
+            hits.append(match)
+            seen_categories.add(match.category)
+    return hits
+
+
+def _keyword_contains(longer: str, shorter: str) -> bool:
+    if longer == shorter:
+        return True
+    if _contains_cjk_or_non_word(longer) or _contains_cjk_or_non_word(shorter):
+        return shorter in longer
+    return re.search(rf"(?<![a-z0-9]){re.escape(shorter)}(?![a-z0-9])", longer, re.I) is not None
 
 
 def _phrase_matches(text: str, phrase: str) -> bool:

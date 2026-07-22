@@ -79,13 +79,13 @@ def create_browser_settings_tab(webui_manager: WebuiManager):
         with gr.Row():
             window_w = gr.Number(
                 label="Window Width",
-                value=1280,
+                value=int(os.getenv("RESOLUTION_WIDTH", "1920")),
                 info="Browser window width",
                 interactive=True
             )
             window_h = gr.Number(
                 label="Window Height",
-                value=1100,
+                value=int(os.getenv("RESOLUTION_HEIGHT", "1080")),
                 info="Browser window height",
                 interactive=True
             )
