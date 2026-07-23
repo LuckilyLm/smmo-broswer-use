@@ -57,6 +57,7 @@ users = Table(
     Column("password_hash", Text, nullable=False),
     Column("display_name", String(255), nullable=False),
     Column("status", String(50), nullable=False, default="active"),
+    Column("must_change_password", Boolean, nullable=False, default=False),
     Column("created_at", DateTime(timezone=True), nullable=False, default=utc_now),
     Column("updated_at", DateTime(timezone=True), nullable=False, default=utc_now),
 )
@@ -266,6 +267,7 @@ execution_queue_items = Table(
     Column("status", String(50), nullable=False, default="queued"),
     Column("priority", Integer, nullable=False, default=100),
     Column("schedule_trigger_key", String(255)),
+    Column("claimed_by", String(255)),
     Column("queued_at", DateTime(timezone=True), nullable=False, default=utc_now),
     Column("started_at", DateTime(timezone=True)),
     Column("finished_at", DateTime(timezone=True)),
@@ -332,6 +334,7 @@ worker_heartbeats = Table(
     Column("last_seen_at", DateTime(timezone=True), nullable=False),
     Column("status", String(50), nullable=False, default="online"),
     Column("current_queue_item_id", String(64)),
+    Column("last_error", Text),
     Column("created_at", DateTime(timezone=True), nullable=False, default=utc_now),
     Column("updated_at", DateTime(timezone=True), nullable=False, default=utc_now),
 )

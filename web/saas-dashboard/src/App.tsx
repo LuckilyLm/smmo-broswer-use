@@ -83,6 +83,12 @@ export default function App() {
     return () => { cancelled = true; };
   }, []);
 
+  useEffect(() => {
+    const expired = () => { setMe(null); setAuthState("anonymous"); window.history.replaceState({}, "", "/login"); };
+    window.addEventListener("saas:session-expired", expired);
+    return () => window.removeEventListener("saas:session-expired", expired);
+  }, []);
+
   const navigate = (next: string) => {
     window.history.pushState({}, "", next);
     setPath(next);
@@ -171,6 +177,8 @@ function renderRoute(path: string) {
 
 function Dashboard() {
   const { data, loading, error, refresh } = useResource<ApiRecord>("/api/dashboard/summary", {});
+  const { data: worker } = useResource<ApiRecord>("/api/system/worker-status", {});
+  const { data: scheduler } = useResource<ApiRecord>("/api/system/scheduler-status", {});
   return (
     <Page title="Dashboard" action={<Button icon={<ReloadOutlined />} onClick={refresh}>Refresh</Button>}>
       <ResourceState loading={loading} error={error} empty={false}>
@@ -183,6 +191,8 @@ function Dashboard() {
           <Card><Statistic title="Running tasks" value={data.running_tasks || 0} /></Card>
           <Card><Statistic title="Auto tasks today" value={data.auto_tasks_today || 0} /></Card>
           <Card><Statistic title="Failed tasks" value={data.failed_tasks || 0} /></Card>
+          <Card><Statistic title="Worker" value={worker.online ? "Online" : "Offline"} /></Card>
+          <Card><Statistic title="Scheduler" value={scheduler.online ? "Online" : "Offline"} /></Card>
         </div>
         <div className="wide-grid">
           <ProCard title="Recent executions"><DataList rows={data.recent_executions || []} fields={["run_id", "status", "selected_count"]} /></ProCard>
@@ -625,6 +635,9 @@ function TokenUsage() {
 
 function Settings() {
   const { data } = useResource<ApiRecord>("/api/settings", {});
+  const { data: backend } = useResource<ApiRecord>("/api/version", {});
+  const frontendVersion = import.meta.env.VITE_APP_VERSION || "0.1.0";
+  const frontendCommit = import.meta.env.VITE_GIT_COMMIT || "unknown";
   return (
     <Page title="Settings">
       <ProCard title="Safety">
@@ -632,6 +645,13 @@ function Settings() {
           <Typography.Text>Manual approval is required for every campaign run.</Typography.Text>
           <Switch checked={Boolean(data.send_disabled)} disabled />
         </Space>
+      </ProCard>
+      <ProCard title="Version">
+        <Descriptions column={1} size="small" items={[
+          { key: "frontend", label: "Frontend", children: `${frontendVersion} (${frontendCommit})` },
+          { key: "backend", label: "Backend", children: `${backend.app_version || "unknown"} (${backend.git_commit || "unknown"})` },
+          { key: "build", label: "Backend build", children: backend.build_time || "unknown" }
+        ]} />
       </ProCard>
     </Page>
   );

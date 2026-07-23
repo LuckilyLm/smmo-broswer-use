@@ -11,3 +11,6 @@ langchain-community
 sqlalchemy
 psycopg[binary]
 alembic
+fastapi
+uvicorn[standard]
+python-dotenv

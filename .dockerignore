@@ -3,3 +3,13 @@ tmp
 results
 
 .env
+.env.*
+!.env.production.example
+.git
+.pytest_cache
+**/__pycache__
+**/*.pyc
+artifacts
+backups
+web/saas-dashboard/node_modules
+web/saas-dashboard/dist

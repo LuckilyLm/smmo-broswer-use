@@ -3,6 +3,7 @@ import ReactDOM from "react-dom/client";
 import { ConfigProvider } from "antd";
 import App from "./App";
 import "./styles.css";
+import { ErrorBoundary } from "./ErrorBoundary";
 
 ReactDOM.createRoot(document.getElementById("root")!).render(
   <React.StrictMode>
@@ -15,7 +16,7 @@ ReactDOM.createRoot(document.getElementById("root")!).render(
         }
       }}
     >
-      <App />
+      <ErrorBoundary><App /></ErrorBoundary>
     </ConfigProvider>
   </React.StrictMode>
 );

@@ -77,9 +77,9 @@ def write_history(path, *items):
     path.write_text("\n".join(json.dumps(item, ensure_ascii=False) for item in items) + "\n", encoding="utf-8")
 
 
-def verified_history(comment_id, reply_text="Reply 1", *, ts="2026-07-22T00:00:00+00:00"):
+def verified_history(comment_id, reply_text="Reply 1", *, ts=None):
     return {
-        "timestamp": ts,
+        "timestamp": ts or datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0).isoformat(),
         "status": "verified",
         "success": True,
         "verified": True,

@@ -1,0 +1,121 @@
+name: browser-use-webui
+
+x-saas-env: &saas-env
+  SAAS_ENV: production
+  DATABASE_URL: postgresql+psycopg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+  SESSION_SECRET: ${SESSION_SECRET}
+  SAAS_ALLOWED_ORIGINS: ${SAAS_ALLOWED_ORIGINS}
+  SAAS_COOKIE_SECURE: ${SAAS_COOKIE_SECURE:-true}
+  SAAS_DB_POOL_SIZE: ${SAAS_DB_POOL_SIZE:-10}
+  SAAS_DB_MAX_OVERFLOW: ${SAAS_DB_MAX_OVERFLOW:-20}
+  SAAS_DB_POOL_RECYCLE: ${SAAS_DB_POOL_RECYCLE:-1800}
+  SAAS_RUNTIME_HOST: ${SAAS_RUNTIME_HOST:-local}
+  SAAS_BROWSER_PROFILE_ROOT: ${SAAS_BROWSER_PROFILE_ROOT:-/data/browser_profiles}
+  SAAS_BROWSER_IDLE_TIMEOUT_MINUTES: ${SAAS_BROWSER_IDLE_TIMEOUT_MINUTES:-30}
+  SAAS_MAX_QUEUED_EXECUTIONS_PER_TENANT: ${SAAS_MAX_QUEUED_EXECUTIONS_PER_TENANT:-50}
+  SAAS_WORKER_CONCURRENCY: ${SAAS_WORKER_CONCURRENCY:-1}
+  SAAS_HEARTBEAT_STALE_SECONDS: ${SAAS_HEARTBEAT_STALE_SECONDS:-60}
+  SAAS_QUEUE_STALE_SECONDS: ${SAAS_QUEUE_STALE_SECONDS:-21600}
+  SAAS_EXECUTION_RETENTION_DAYS: ${SAAS_EXECUTION_RETENTION_DAYS:-90}
+  SAAS_ARTIFACT_RETENTION_DAYS: ${SAAS_ARTIFACT_RETENTION_DAYS:-30}
+  SAAS_ENABLE_DEMO_SEED: ${SAAS_ENABLE_DEMO_SEED:-false}
+  SAAS_BOOTSTRAP_ADMIN_EMAIL: ${SAAS_BOOTSTRAP_ADMIN_EMAIL:-}
+  SAAS_BOOTSTRAP_ADMIN_PASSWORD: ${SAAS_BOOTSTRAP_ADMIN_PASSWORD:-}
+  APP_VERSION: ${APP_VERSION:-7.4.0}
+  GIT_COMMIT: ${GIT_COMMIT:-unknown}
+  BUILD_TIME: ${BUILD_TIME:-unknown}
+  LOG_LEVEL: ${LOG_LEVEL:-INFO}
+
+x-logging: &saas-logging
+  driver: json-file
+  options:
+    max-size: "50m"
+    max-file: "10"
+
+x-app: &saas-app
+  image: browser-use-webui/saas-api:${GIT_COMMIT:-local}
+  build:
+    context: .
+    dockerfile: deploy/docker/Dockerfile.saas
+  environment: *saas-env
+  restart: unless-stopped
+  logging: *saas-logging
+  depends_on:
+    saas-migrate:
+      condition: service_completed_successfully
+
+services:
+  postgres:
+    image: postgres:16
+    container_name: browser-use-webui-saas-postgres
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    ports:
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - saas_postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+    restart: unless-stopped
+    logging: *saas-logging
+
+  saas-migrate:
+    image: browser-use-webui/saas-api:${GIT_COMMIT:-local}
+    build:
+      context: .
+      dockerfile: deploy/docker/Dockerfile.saas
+    environment: *saas-env
+    command: ["python", "scripts/saas_migrate.py"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+    logging: *saas-logging
+
+  saas-api:
+    <<: *saas-app
+    command: ["uvicorn", "src.facebook_leads.saas.api:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "1"]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/health', timeout=3)"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+
+  saas-worker:
+    <<: *saas-app
+    command: ["python", "scripts/saas_worker.py"]
+    volumes:
+      - browser_profiles:/data/browser_profiles
+      - saas_artifacts:/app/artifacts/saas
+
+  saas-scheduler:
+    <<: *saas-app
+    command: ["python", "scripts/saas_scheduler.py"]
+
+  frontend:
+    image: browser-use-webui/saas-frontend:${GIT_COMMIT:-local}
+    build:
+      context: .
+      dockerfile: deploy/docker/Dockerfile.saas-frontend
+      args:
+        VITE_API_BASE_URL: ${VITE_API_BASE_URL:-}
+        VITE_APP_VERSION: ${APP_VERSION:-7.4.0}
+        VITE_GIT_COMMIT: ${GIT_COMMIT:-unknown}
+    ports:
+      - "127.0.0.1:${SAAS_FRONTEND_PORT:-8080}:80"
+    depends_on:
+      saas-api:
+        condition: service_healthy
+    restart: unless-stopped
+    logging: *saas-logging
+
+volumes:
+  saas_postgres_data:
+    name: browser-use-webui_saas_postgres_data
+  browser_profiles:
+  saas_artifacts:

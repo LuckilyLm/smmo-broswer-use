@@ -203,6 +203,16 @@ class BrowserRuntimeRegistry:
             return self.storage.update_by_id("browser_runtimes", runtime_id, {"status": "unhealthy", "last_error": "CDP unreachable"}, tenant_id=context.tenant_id)
         return runtime
 
+    def reconcile_all(self) -> int:
+        reconciled = 0
+        for runtime in self.storage.list("browser_runtimes", limit=10000):
+            context = TenantContext(tenant_id=runtime["tenant_id"], user_id="startup", role="system")
+            before = runtime.get("status")
+            after = self.reconcile_runtime(context, runtime["id"])
+            if after and after.get("status") != before:
+                reconciled += 1
+        return reconciled
+
     def allocate_port(self) -> int:
         start = int(os.getenv("SAAS_BROWSER_CDP_PORT_START", "9300"))
         end = int(os.getenv("SAAS_BROWSER_CDP_PORT_END", "9399"))

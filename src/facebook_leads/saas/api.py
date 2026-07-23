@@ -1,15 +1,24 @@
 from __future__ import annotations
 
 import os
-from datetime import timedelta
+import hashlib
+import hmac
+import time
+from collections import defaultdict, deque
+from contextlib import asynccontextmanager
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
 from dotenv import load_dotenv
-from fastapi import Cookie, Depends, FastAPI, Header, HTTPException, Response
+from fastapi import Cookie, Depends, FastAPI, Header, HTTPException, Request, Response
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 
 from .db import utc_now
+from .config import ProductionConfig
+from .logging import configure_logging
 from .models import TenantContext
 from .runtime import BrowserRuntimeError
 from .service import SaaSService
@@ -20,16 +29,65 @@ load_dotenv(Path(__file__).resolve().parents[3] / ".env")
 SESSION_COOKIE = "leadflow_session"
 
 
-def create_app(*, database_url: str | None = None, service: SaaSService | None = None) -> FastAPI:
-    app = FastAPI(title="Facebook Leads SaaS API")
+class LoginRateLimiter:
+    def __init__(self, limit: int, *, window_seconds: int = 60) -> None:
+        self.limit = limit
+        self.window_seconds = window_seconds
+        self.failures: dict[str, deque[float]] = defaultdict(deque)
+
+    def allowed(self, key: str) -> bool:
+        failures = self.failures[key]
+        cutoff = time.monotonic() - self.window_seconds
+        while failures and failures[0] < cutoff:
+            failures.popleft()
+        return len(failures) < self.limit
+
+    def record_failure(self, key: str) -> None:
+        self.failures[key].append(time.monotonic())
+
+    def reset(self, key: str) -> None:
+        self.failures.pop(key, None)
+
+
+def create_app(*, database_url: str | None = None, service: SaaSService | None = None, config: ProductionConfig | None = None) -> FastAPI:
+    config = config or ProductionConfig.from_env()
+    service_instance = service or SaaSService(SaaSStorage(database_url, create_schema=False))
+    logger = configure_logging("api", config.log_level)
+
+    @asynccontextmanager
+    async def lifespan(_app: FastAPI):
+        reconciled = service_instance.runtime_registry.reconcile_all()
+        bootstrapped = service_instance.bootstrap_admin(config.bootstrap_admin_email, config.bootstrap_admin_password)
+        logger.info("startup reconciliation complete", extra={"reconciled_runtimes": reconciled, "admin_bootstrapped": bool(bootstrapped)})
+        yield
+
+    app = FastAPI(title="Facebook Leads SaaS API", lifespan=lifespan)
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
+        allow_origins=list(config.allowed_origins),
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],
     )
-    app.state.service = service or SaaSService(SaaSStorage(database_url, create_schema=False))
+    app.state.config = config
+    app.state.service = service_instance
+    app.state.login_rate_limiter = LoginRateLimiter(config.login_rate_limit_per_minute)
+
+    @app.exception_handler(HTTPException)
+    async def http_error(_request: Request, exc: HTTPException) -> JSONResponse:
+        code = {400: "bad_request", 401: "session_expired", 403: "permission_denied", 404: "not_found", 409: "conflict", 429: "rate_limit_reached", 503: "service_unavailable"}.get(exc.status_code, "request_failed")
+        message = exc.detail if isinstance(exc.detail, str) else "Request failed"
+        if message == "queue_limit_reached":
+            code = "queue_limit_reached"
+        return JSONResponse(status_code=exc.status_code, content={"error": {"code": code, "message": message}})
+
+    @app.exception_handler(RequestValidationError)
+    async def validation_error(_request: Request, _exc: RequestValidationError) -> JSONResponse:
+        return JSONResponse(status_code=422, content={"error": {"code": "invalid_request", "message": "Request validation failed"}})
+
+    @app.exception_handler(Exception)
+    async def internal_error(_request: Request, _exc: Exception) -> JSONResponse:
+        return JSONResponse(status_code=500, content={"error": {"code": "internal_error", "message": "Internal server error"}})
 
     def get_service() -> SaaSService:
         return app.state.service
@@ -39,44 +97,49 @@ def create_app(*, database_url: str | None = None, service: SaaSService | None =
         session_cookie: str = Cookie(default="", alias=SESSION_COOKIE),
         svc: SaaSService = Depends(get_service),
     ) -> TenantContext:
-        token = _session_token(authorization, session_cookie)
+        token = _session_token(authorization, session_cookie, config.session_secret)
         try:
             return svc.context_from_token(token)
         except PermissionError as exc:
             raise HTTPException(status_code=401, detail=str(exc)) from exc
 
     @app.get("/api/health")
-    def health(svc: SaaSService = Depends(get_service)) -> dict[str, str]:
-        try:
-            svc.storage.ping()
-            return {"status": "ok", "database": "ok"}
-        except Exception:
-            return {"status": "degraded", "database": "error"}
+    def health() -> dict[str, str]:
+        return {"status": "ok"}
+
+    @app.get("/api/version")
+    def version() -> dict[str, str]:
+        return {"app_version": config.app_version, "git_commit": config.git_commit, "build_time": config.build_time}
 
     @app.get("/api/ready")
     def ready(svc: SaaSService = Depends(get_service)) -> dict[str, str]:
         try:
             svc.storage.ping()
-            if not svc.storage.schema_available():
-                raise RuntimeError("schema unavailable")
+            if not svc.storage.schema_current():
+                raise RuntimeError("schema is not current")
             return {"status": "ready", "database": "ok", "schema": "ok"}
         except Exception as exc:
             raise HTTPException(status_code=503, detail={"status": "not_ready", "database": "error", "reason": type(exc).__name__}) from exc
 
     @app.post("/api/auth/login")
-    def login(payload: dict[str, Any], response: Response, svc: SaaSService = Depends(get_service)) -> dict[str, Any]:
+    def login(payload: dict[str, Any], response: Response, request: Request, svc: SaaSService = Depends(get_service)) -> dict[str, Any]:
+        client_key = request.client.host if request.client else "unknown"
+        if not app.state.login_rate_limiter.allowed(client_key):
+            raise HTTPException(status_code=429, detail="Too many login attempts")
         try:
             result = svc.login(payload.get("email", ""), payload.get("password", ""))
+            app.state.login_rate_limiter.reset(client_key)
             response.set_cookie(
                 SESSION_COOKIE,
-                result["access_token"],
+                _sign_session_token(result["access_token"], config.session_secret),
                 httponly=True,
-                secure=os.getenv("SAAS_COOKIE_SECURE", "false").lower() == "true",
+                secure=config.cookie_secure,
                 samesite="lax",
                 path="/",
             )
             return result
         except PermissionError as exc:
+            app.state.login_rate_limiter.record_failure(client_key)
             raise HTTPException(status_code=401, detail=str(exc)) from exc
 
     @app.post("/api/auth/logout")
@@ -86,7 +149,7 @@ def create_app(*, database_url: str | None = None, service: SaaSService | None =
         session_cookie: str = Cookie(default="", alias=SESSION_COOKIE),
         svc: SaaSService = Depends(get_service),
     ) -> dict[str, bool]:
-        svc.logout(_session_token(authorization, session_cookie))
+        svc.logout(_session_token(authorization, session_cookie, config.session_secret))
         response.delete_cookie(SESSION_COOKIE, path="/")
         return {"ok": True}
 
@@ -107,7 +170,7 @@ def create_app(*, database_url: str | None = None, service: SaaSService | None =
         svc: SaaSService = Depends(get_service),
     ) -> dict[str, Any]:
         switched = svc.switch_tenant(context, tenant_id)
-        token = _session_token(authorization, session_cookie)
+        token = _session_token(authorization, session_cookie, config.session_secret)
         svc.storage.update_by_id("sessions", token, {"tenant_id": switched.tenant_id})
         return {"tenant_id": switched.tenant_id}
 
@@ -344,6 +407,16 @@ def create_app(*, database_url: str | None = None, service: SaaSService | None =
         except PermissionError as exc:
             raise HTTPException(status_code=404, detail="not found") from exc
 
+    @app.get("/api/system/worker-status")
+    def worker_status(context: TenantContext = Depends(require_context), svc: SaaSService = Depends(get_service)) -> dict[str, Any]:
+        del context
+        now = utc_now()
+        row = svc.storage.query_all(
+            "SELECT COUNT(*) AS worker_count, MAX(last_seen_at) AS last_heartbeat_at FROM worker_heartbeats WHERE worker_id <> ? AND status IN (?, ?, ?) AND last_seen_at >= ?",
+            ["scheduler", "online", "polling", "running", now - timedelta(seconds=config.heartbeat_stale_seconds)],
+        )[0]
+        return {"online": int(row["worker_count"]) > 0, "last_heartbeat_at": row["last_heartbeat_at"], "worker_count": int(row["worker_count"])}
+
     @app.get("/api/system/scheduler-status")
     def scheduler_status(context: TenantContext = Depends(require_context), svc: SaaSService = Depends(get_service)) -> dict[str, Any]:
         queue_counts = svc.storage.queue_counts(tenant_id=context.tenant_id)
@@ -353,15 +426,16 @@ def create_app(*, database_url: str | None = None, service: SaaSService | None =
             [context.tenant_id, True, now],
         )[0]["count"]
         scheduler_heartbeat = svc.storage.find_one("worker_heartbeats", {"worker_id": "scheduler"})
-        stale_after = int(os.getenv("SAAS_HEARTBEAT_STALE_SECONDS", "60"))
-        online_workers = svc.storage.query_all(
-            "SELECT COUNT(*) AS count FROM worker_heartbeats WHERE worker_id <> ? AND last_seen_at >= ?",
-            ["scheduler", now - timedelta(seconds=stale_after)],
-        )[0]["count"]
+        scheduler_online = bool(
+            scheduler_heartbeat
+            and scheduler_heartbeat.get("status") == "online"
+            and _as_utc_datetime(scheduler_heartbeat["last_seen_at"]) >= now - timedelta(seconds=config.heartbeat_stale_seconds)
+        )
         return {
+            "online": scheduler_online,
             "last_tick_at": scheduler_heartbeat.get("last_seen_at") if scheduler_heartbeat else None,
             "due_campaign_count": int(due),
-            "worker_online": int(online_workers) > 0,
+            "last_error": scheduler_heartbeat.get("last_error") if scheduler_heartbeat else None,
             "queued_tasks": queue_counts.get("queued", 0) + queue_counts.get("retry_waiting", 0),
             "running_tasks": queue_counts.get("running", 0),
         }
@@ -389,5 +463,24 @@ else:
     app = create_app(database_url="sqlite:///artifacts/saas/saas.sqlite")
 
 
-def _session_token(authorization: str, session_cookie: str) -> str:
-    return authorization.removeprefix("Bearer ").strip() or session_cookie.strip()
+def _sign_session_token(token: str, secret: str) -> str:
+    signature = hmac.new(secret.encode("utf-8"), token.encode("utf-8"), hashlib.sha256).hexdigest()
+    return f"{token}.{signature}"
+
+
+def _session_token(authorization: str, session_cookie: str, secret: str) -> str:
+    bearer = authorization.removeprefix("Bearer ").strip()
+    if bearer:
+        return bearer
+    token, separator, signature = session_cookie.strip().partition(".")
+    if not separator or not token or not signature:
+        return ""
+    expected = hmac.new(secret.encode("utf-8"), token.encode("utf-8"), hashlib.sha256).hexdigest()
+    return token if hmac.compare_digest(signature, expected) else ""
+
+
+def _as_utc_datetime(value: Any) -> datetime:
+    if hasattr(value, "tzinfo"):
+        return value.replace(tzinfo=timezone.utc) if value.tzinfo is None else value
+    parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    return parsed.replace(tzinfo=timezone.utc) if parsed.tzinfo is None else parsed

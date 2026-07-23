@@ -1,0 +1,8 @@
+browser-use==0.1.48
+json-repair
+sqlalchemy
+psycopg[binary]
+alembic
+fastapi
+uvicorn[standard]
+python-dotenv

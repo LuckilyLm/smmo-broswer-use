@@ -47,6 +47,17 @@ class SaaSStorage:
         inspector = inspect(self.engine)
         return all(name in inspector.get_table_names() for name in TABLES)
 
+    def schema_current(self) -> bool:
+        if not self.schema_available():
+            return False
+        if self.engine.dialect.name == "sqlite":
+            return True
+        try:
+            row = self.query_one("SELECT version_num FROM alembic_version", [])
+            return bool(row and row.get("version_num") == "004_production_operations")
+        except Exception:
+            return False
+
     def insert(self, table: str, data: dict[str, Any]) -> dict[str, Any]:
         db_table = _table(table)
         payload = _prepare_payload(table, data)
@@ -229,7 +240,7 @@ class SaaSStorage:
             },
         ) or _row(payload)
 
-    def claim_queue_item(self) -> dict[str, Any] | None:
+    def claim_queue_item(self, *, worker_id: str | None = None) -> dict[str, Any] | None:
         queue = _table("execution_queue_items")
         now = utc_now()
         with self.session_factory.begin() as session:
@@ -252,7 +263,7 @@ class SaaSStorage:
                 session.execute(
                     update(queue)
                     .where(queue.c.id == item_id)
-                    .values(status="running", started_at=now, attempt_count=queue.c.attempt_count + 1, updated_at=now)
+                    .values(status="running", started_at=now, claimed_by=worker_id, attempt_count=queue.c.attempt_count + 1, updated_at=now)
                 )
             else:
                 candidate = stmt.scalar_subquery()
@@ -264,7 +275,7 @@ class SaaSStorage:
                             queue.c.status.in_(["queued", "retry_waiting"]),
                         )
                     )
-                    .values(status="running", started_at=now, attempt_count=queue.c.attempt_count + 1, updated_at=now)
+                    .values(status="running", started_at=now, claimed_by=worker_id, attempt_count=queue.c.attempt_count + 1, updated_at=now)
                     .returning(queue.c.id)
                 ).scalar_one_or_none()
                 if not claimed:
@@ -307,14 +318,31 @@ class SaaSStorage:
         )
         return {str(row["status"]): int(row["count"]) for row in rows}
 
-    def fail_stale_queue_items(self, *, stale_before: datetime) -> int:
+    def fail_stale_queue_items(self, *, stale_before: datetime, heartbeat_stale_before: datetime | None = None) -> int:
         queue = _table("execution_queue_items")
         executions = _table("executions")
+        heartbeats = _table("worker_heartbeats")
         now = utc_now()
+        heartbeat_stale_before = heartbeat_stale_before or stale_before
         with self.session_factory.begin() as session:
             stale_rows = session.execute(
                 select(queue.c.id, queue.c.execution_id).where(
-                    and_(queue.c.status == "running", queue.c.started_at.is_not(None), queue.c.started_at <= stale_before)
+                    and_(
+                        queue.c.status == "running",
+                        queue.c.started_at.is_not(None),
+                        queue.c.started_at <= stale_before,
+                        or_(
+                            queue.c.claimed_by.is_(None),
+                            ~select(heartbeats.c.id).where(
+                                and_(
+                                    heartbeats.c.worker_id == queue.c.claimed_by,
+                                    heartbeats.c.current_queue_item_id == queue.c.id,
+                                    heartbeats.c.last_seen_at > heartbeat_stale_before,
+                                    heartbeats.c.status.in_(["running", "online", "polling"]),
+                                )
+                            ).exists(),
+                        ),
+                    )
                 )
             ).mappings().all()
             for row in stale_rows:

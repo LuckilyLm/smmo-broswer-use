@@ -18,8 +18,12 @@ class ExecutionWorker:
     async def tick(self) -> dict[str, Any] | None:
         self.heartbeat(status="polling")
         stale_seconds = int(os.getenv("SAAS_QUEUE_STALE_SECONDS", "21600"))
-        self.service.storage.fail_stale_queue_items(stale_before=utc_now() - timedelta(seconds=stale_seconds))
-        item = self.service.storage.claim_queue_item()
+        heartbeat_seconds = int(os.getenv("SAAS_HEARTBEAT_STALE_SECONDS", "60"))
+        self.service.storage.fail_stale_queue_items(
+            stale_before=utc_now() - timedelta(seconds=stale_seconds),
+            heartbeat_stale_before=utc_now() - timedelta(seconds=heartbeat_seconds),
+        )
+        item = self.service.storage.claim_queue_item(worker_id=self.worker_id)
         if not item:
             return None
         self.heartbeat(status="running", current_queue_item_id=item["id"])
@@ -28,10 +32,17 @@ class ExecutionWorker:
         finally:
             self.heartbeat(status="online", current_queue_item_id=None)
 
-    async def run_forever(self, *, poll_seconds: float = 5.0) -> None:
-        while True:
+    async def run_forever(self, *, poll_seconds: float = 5.0, stop_event: asyncio.Event | None = None) -> None:
+        stop_event = stop_event or asyncio.Event()
+        while not stop_event.is_set():
             await self.tick()
-            await asyncio.sleep(poll_seconds)
+            if stop_event.is_set():
+                break
+            try:
+                await asyncio.wait_for(stop_event.wait(), timeout=poll_seconds)
+            except TimeoutError:
+                pass
+        self.heartbeat(status="stopped", current_queue_item_id=None)
 
     def heartbeat(self, *, status: str, current_queue_item_id: str | None = None) -> dict[str, Any]:
         existing = self.service.storage.find_one("worker_heartbeats", {"worker_id": self.worker_id})

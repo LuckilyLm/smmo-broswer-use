@@ -1,5 +1,7 @@
 <img src="./assets/web-ui.png" alt="Browser Use Web UI" width="full"/>
 
+Multi-tenant SaaS production deployment: [docs/saas-production-deployment.md](docs/saas-production-deployment.md).
+
 <br/>
 
 [![GitHub stars](https://img.shields.io/github/stars/browser-use/web-ui?style=social)](https://github.com/browser-use/web-ui/stargazers)

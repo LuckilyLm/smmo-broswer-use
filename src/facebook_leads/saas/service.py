@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import secrets
+import os
 from datetime import datetime, time, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -10,7 +11,7 @@ from .auth import hash_password, verify_password
 from .db import utc_now
 from .models import PLATFORMS, TARGET_POLICIES, TenantContext
 from .persist import persist_orchestrator_result
-from .providers import BasePlatformProvider, PlatformRunContext, ProviderRunRequest, default_provider_registry, internal_runs_root
+from .providers import BasePlatformProvider, PlatformRunContext, ProviderRunRequest, default_provider_registry
 from .runtime import BrowserRuntimeError, BrowserRuntimeRegistry, safe_runtime
 from .storage import SaaSStorage
 
@@ -31,17 +32,27 @@ class SaaSService:
         providers: dict[str, BasePlatformProvider] | None = None,
         artifacts_root: str | Path = "artifacts/saas",
         runtime_registry: BrowserRuntimeRegistry | None = None,
+        max_queued_executions_per_tenant: int | None = None,
     ) -> None:
         self.storage = storage
         self.providers = providers or default_provider_registry()
         self.artifacts_root = Path(artifacts_root)
         self.runtime_registry = runtime_registry or BrowserRuntimeRegistry(storage)
+        self.max_queued_executions_per_tenant = max_queued_executions_per_tenant or int(os.getenv("SAAS_MAX_QUEUED_EXECUTIONS_PER_TENANT", "50"))
 
     def create_tenant(self, name: str, slug: str, **settings: Any) -> dict[str, Any]:
         return self.storage.insert("tenants", {"name": name, "slug": slug, "status": settings.get("status", "active"), **{k: v for k, v in settings.items() if k in {"default_target_policy", "default_min_confidence", "default_daily_limit"}}})
 
-    def create_user(self, email: str, password: str, display_name: str, *, status: str = "active") -> dict[str, Any]:
-        return self.storage.insert("users", {"email": email.lower(), "password_hash": hash_password(password), "display_name": display_name, "status": status})
+    def create_user(self, email: str, password: str, display_name: str, *, status: str = "active", must_change_password: bool = False) -> dict[str, Any]:
+        return self.storage.insert("users", {"email": email.lower(), "password_hash": hash_password(password), "display_name": display_name, "status": status, "must_change_password": must_change_password})
+
+    def bootstrap_admin(self, email: str | None, password: str | None) -> dict[str, Any] | None:
+        if not email or not password or self.storage.count("users"):
+            return None
+        tenant = self.create_tenant("Default", "default")
+        user = self.create_user(email, password, "Administrator", must_change_password=True)
+        self.add_user_to_tenant(tenant["id"], user["id"], role="admin")
+        return user
 
     def add_user_to_tenant(self, tenant_id: str, user_id: str, *, role: str = "member") -> dict[str, Any]:
         return self.storage.insert("tenant_users", {"tenant_id": tenant_id, "user_id": user_id, "role": role})
@@ -310,6 +321,10 @@ class SaaSService:
 
     def enqueue_campaign_execution(self, context: TenantContext, campaign_id: str, *, trigger_type: str, schedule_trigger_key: str | None = None) -> dict[str, Any]:
         campaign = self._require_campaign(context, campaign_id)
+        queue_counts = self.storage.queue_counts(tenant_id=context.tenant_id)
+        queued_count = queue_counts.get("queued", 0) + queue_counts.get("retry_waiting", 0)
+        if queued_count >= self.max_queued_executions_per_tenant:
+            raise ValueError("queue_limit_reached")
         account = self.storage.get_by_id("platform_accounts", campaign["platform_account_id"], tenant_id=context.tenant_id)
         if not account:
             raise PermissionError("platform account not found")
@@ -402,7 +417,7 @@ class SaaSService:
                 keyword_row = self.storage.insert("execution_keywords", {"tenant_id": context.tenant_id, "execution_id": execution["id"], "campaign_keyword_id": keyword["id"], "keyword": keyword["keyword"], "status": "running", "started_at": utc_now()})
                 self.storage.update_by_id("executions", execution["id"], {"current_keyword": keyword["keyword"], "progress_percent": int((index - 1) * 100 / len(keywords))}, tenant_id=context.tenant_id)
                 try:
-                    result = await provider.run_campaign(self._provider_request(context, campaign, keyword["keyword"], run_context))
+                    result = await provider.run_campaign(self._provider_request(context, campaign, keyword["keyword"], run_context, execution["id"]))
                     summary = _keyword_summary(result)
                     status = "failed" if result.get("status") in {"failed", "not_implemented"} else "completed"
                     if status == "completed":
@@ -437,7 +452,8 @@ class SaaSService:
             self._runtime_locks.discard(lock_key)
             self.storage.release_runtime_lock(database_lock)
 
-    def _provider_request(self, context: TenantContext, campaign: dict[str, Any], keyword: str, run_context: PlatformRunContext) -> ProviderRunRequest:
+    def _provider_request(self, context: TenantContext, campaign: dict[str, Any], keyword: str, run_context: PlatformRunContext, execution_id: str) -> ProviderRunRequest:
+        execution_root = self.artifacts_root / "tenants" / context.tenant_id / "executions" / execution_id
         return ProviderRunRequest(
             tenant_id=context.tenant_id,
             campaign_id=campaign["id"],
@@ -449,8 +465,8 @@ class SaaSService:
             max_leads=int(campaign["max_leads"]),
             daily_limit=int(campaign["daily_limit"]),
             llm_enabled=bool(campaign["llm_enabled"]),
-            history_path=str(self.artifacts_root / context.tenant_id / "reply_history.jsonl"),
-            runs_root=internal_runs_root(self.artifacts_root, context.tenant_id),
+            history_path=str(execution_root / "reply_history.jsonl"),
+            runs_root=str(execution_root / "runs"),
             run_context=run_context,
         )
 

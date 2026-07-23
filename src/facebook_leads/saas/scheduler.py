@@ -40,7 +40,7 @@ class CampaignScheduler:
         try:
             return self.service.enqueue_campaign_execution(context, schedule["campaign_id"], trigger_type="scheduled", schedule_trigger_key=trigger_key)
         except ValueError as exc:
-            if "already enqueued" in str(exc):
+            if "already enqueued" in str(exc) or "queue_limit_reached" in str(exc):
                 return None
             raise
 
@@ -68,8 +68,16 @@ class CampaignScheduler:
         return enqueued
 
     def _heartbeat(self) -> None:
-        payload = {"worker_id": "scheduler", "last_seen_at": self.last_tick_at or utc_now(), "status": "online", "current_queue_item_id": None}
+        payload = {"worker_id": "scheduler", "last_seen_at": self.last_tick_at or utc_now(), "status": "online", "current_queue_item_id": None, "last_error": None}
         existing = self.service.storage.find_one("worker_heartbeats", {"worker_id": "scheduler"})
+        if existing:
+            self.service.storage.update_by_id("worker_heartbeats", existing["id"], payload)
+        else:
+            self.service.storage.insert_ignore("worker_heartbeats", payload)
+
+    def record_error(self, error_type: str) -> None:
+        existing = self.service.storage.find_one("worker_heartbeats", {"worker_id": "scheduler"})
+        payload = {"worker_id": "scheduler", "last_seen_at": utc_now(), "status": "error", "last_error": error_type}
         if existing:
             self.service.storage.update_by_id("worker_heartbeats", existing["id"], payload)
         else:
