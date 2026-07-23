@@ -197,6 +197,8 @@ IMPLEMENTATION_PLAN.md
 
 # Generated runtime artifacts
 /artifacts
+/backups/
+/.playwright-cli/
 
 # Frontend generated artifacts
 web/saas-dashboard/node_modules/

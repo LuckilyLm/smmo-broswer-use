@@ -249,3 +249,16 @@ def test_ready_requires_current_schema(tmp_path, monkeypatch):
 
     assert response.status_code == 503
     assert response.json()["error"] == {"code": "service_unavailable", "message": "Request failed"}
+
+
+def test_windows_agent_api_does_not_reconcile_host_pids(tmp_path, monkeypatch):
+    service = SaaSService(SaaSStorage(tmp_path / "production.sqlite"))
+    monkeypatch.setattr(
+        service.runtime_registry,
+        "reconcile_all",
+        lambda: (_ for _ in ()).throw(AssertionError("container must not inspect Windows PIDs")),
+    )
+    config = ProductionConfig.from_env({"SAAS_RUNTIME_HOST": "windows-agent"})
+
+    with TestClient(create_app(service=service, config=config)) as client:
+        assert client.get("/api/health").status_code == 200

@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+from types import SimpleNamespace
 from pathlib import Path
 
 import pytest
@@ -16,6 +17,14 @@ from src.facebook_leads.saas.runtime import BrowserRuntimeRegistry
 from src.facebook_leads.saas.service import SaaSService
 from src.facebook_leads.saas.storage import SaaSStorage
 from src.facebook_leads.saas.worker import ExecutionWorker
+
+
+def test_windows_pid_check_does_not_decode_localized_tasklist_output(monkeypatch):
+    if os.name != "nt":
+        pytest.skip("Windows-specific PID probe")
+    monkeypatch.setattr(runtime_module.subprocess, "run", lambda *_args, **_kwargs: SimpleNamespace(stdout=b'"chrome.exe","4508"'))
+
+    assert runtime_module._pid_exists(4508) is True
 
 
 def service_with_registry(tmp_path: Path, *, login_status: str = "logged_in", runner=None):

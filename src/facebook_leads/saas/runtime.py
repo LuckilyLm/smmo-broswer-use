@@ -322,8 +322,8 @@ def _pid_exists(pid: int) -> bool:
     if pid <= 0:
         return False
     if os.name == "nt":
-        result = subprocess.run(["tasklist", "/FI", f"PID eq {pid}", "/FO", "CSV"], capture_output=True, text=True)
-        return str(pid) in result.stdout
+        result = subprocess.run(["tasklist", "/FI", f"PID eq {pid}", "/FO", "CSV"], capture_output=True)
+        return str(pid).encode("ascii") in (result.stdout or b"")
     try:
         os.kill(pid, 0)
         return True

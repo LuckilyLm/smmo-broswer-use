@@ -4,7 +4,7 @@
 
 Nginx serves the React build and proxies `/api` to one FastAPI process. FastAPI, Scheduler, and Worker share PostgreSQL 16; Scheduler enqueues and Worker claims queue rows. Docker logging uses bounded `json-file` rotation.
 
-The current browser implementation launches Windows Chrome and uses local CDP plus local profiles. `SAAS_RUNTIME_HOST=local` is implemented; `windows-agent` is reserved configuration, not a remote-agent implementation. On Windows, run API and Worker on the host when they must launch or reach Windows Chrome. PostgreSQL, Migration, Scheduler, and Nginx can remain in Docker. Do not pretend a Linux container can operate host Windows Chrome. No startup reconciliation auto-starts tenant browsers.
+The current browser implementation launches Windows Chrome and uses local CDP plus local profiles. `SAAS_RUNTIME_HOST=local` is implemented; `windows-agent` tells a container API not to reconcile host PIDs, but it is not a remote-agent implementation. On Windows, run API and Worker on the host when they must launch or reach Windows Chrome. PostgreSQL, Migration, Scheduler, and Nginx can remain in Docker. Do not pretend a Linux container can operate host Windows Chrome. No startup reconciliation auto-starts tenant browsers.
 
 ## Prerequisites and environment
 

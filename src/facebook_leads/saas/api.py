@@ -56,7 +56,7 @@ def create_app(*, database_url: str | None = None, service: SaaSService | None =
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI):
-        reconciled = service_instance.runtime_registry.reconcile_all()
+        reconciled = service_instance.runtime_registry.reconcile_all() if config.runtime_host == "local" else 0
         bootstrapped = service_instance.bootstrap_admin(config.bootstrap_admin_email, config.bootstrap_admin_password)
         logger.info("startup reconciliation complete", extra={"reconciled_runtimes": reconciled, "admin_bootstrapped": bool(bootstrapped)})
         yield
