@@ -55,11 +55,9 @@ function Assert-SaasChromeExecutable {
     if (-not (Test-Path -LiteralPath $env:SAAS_CHROME_EXECUTABLE -PathType Leaf)) {
         throw "SAAS_CHROME_EXECUTABLE does not identify the exact Chrome executable path."
     }
-    try {
-        & $env:SAAS_CHROME_EXECUTABLE --version *> $null
-        if ($LASTEXITCODE -ne 0) { throw "Chrome returned a non-zero exit code." }
-    } catch {
-        throw "SAAS_CHROME_EXECUTABLE must identify a runnable Chrome executable."
+    $item = Get-Item -LiteralPath $env:SAAS_CHROME_EXECUTABLE
+    if ($item.Extension -ne ".exe" -or $item.VersionInfo.FileDescription -notmatch "Chrome") {
+        throw "SAAS_CHROME_EXECUTABLE must identify the Chrome executable."
     }
 }
 
@@ -173,10 +171,18 @@ function Assert-SaasAlembicRevisionSets {
 function Assert-SaasAlembicCurrent {
     param([Parameter(Mandatory = $true)][string]$Python)
 
-    $heads = (& $Python -m alembic heads 2>&1 | Out-String).Trim()
-    if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($heads)) { throw "Unable to read the Alembic head revision." }
-    $current = (& $Python -m alembic current 2>&1 | Out-String).Trim()
-    if ($LASTEXITCODE -ne 0) { throw "Unable to read the current Alembic revision." }
+    $previousErrorActionPreference = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+    try {
+        $heads = (& $Python -m alembic heads 2>&1 | Out-String).Trim()
+        $headsExitCode = $LASTEXITCODE
+        $current = (& $Python -m alembic current 2>&1 | Out-String).Trim()
+        $currentExitCode = $LASTEXITCODE
+    } finally {
+        $ErrorActionPreference = $previousErrorActionPreference
+    }
+    if ($headsExitCode -ne 0 -or [string]::IsNullOrWhiteSpace($heads)) { throw "Unable to read the Alembic head revision." }
+    if ($currentExitCode -ne 0) { throw "Unable to read the current Alembic revision." }
     Assert-SaasAlembicRevisionSets -HeadsOutput $heads -CurrentOutput $current
 }
 
