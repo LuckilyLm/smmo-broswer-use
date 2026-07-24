@@ -2,7 +2,7 @@ name: browser-use-webui
 
 x-saas-env: &saas-env
   SAAS_ENV: production
-  SAAS_DEPLOYMENT_MODE: ${SAAS_DEPLOYMENT_MODE:-control-plane-only}
+  SAAS_DEPLOYMENT_MODE: ${SAAS_DEPLOYMENT_MODE:-windows-local}
   DATABASE_URL: ${SAAS_DATABASE_URL:?SAAS_DATABASE_URL is required}
   SESSION_SECRET: ${SESSION_SECRET:?SESSION_SECRET is required}
   SAAS_ALLOWED_ORIGINS: ${SAAS_ALLOWED_ORIGINS:?SAAS_ALLOWED_ORIGINS is required}
@@ -44,18 +44,6 @@ x-logging: &saas-logging
     max-size: "50m"
     max-file: "10"
 
-x-app: &saas-app
-  image: browser-use-webui/saas-api:${GIT_COMMIT:-local}
-  build:
-    context: .
-    dockerfile: deploy/docker/Dockerfile.saas
-  environment: *saas-env
-  restart: unless-stopped
-  logging: *saas-logging
-  depends_on:
-    saas-migrate:
-      condition: service_completed_successfully
-
 services:
   postgres:
     image: postgres:16
@@ -89,28 +77,6 @@ services:
     restart: "no"
     logging: *saas-logging
 
-  saas-api:
-    <<: *saas-app
-    command: ["uvicorn", "src.facebook_leads.saas.api:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "1"]
-    healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/health', timeout=3)"]
-      interval: 10s
-      timeout: 5s
-      retries: 12
-
-  saas-worker:
-    <<: *saas-app
-    command: ["python", "scripts/saas_worker.py"]
-    volumes:
-      - browser_profiles:/data/browser_profiles
-      - saas_artifacts:/app/artifacts/saas
-    profiles: ["future-runtime-agent"]
-
-  saas-scheduler:
-    <<: *saas-app
-    command: ["python", "scripts/saas_scheduler.py"]
-    profiles: ["automation"]
-
   frontend:
     image: browser-use-webui/saas-frontend:${GIT_COMMIT:-local}
     build:
@@ -120,16 +86,18 @@ services:
         VITE_API_BASE_URL: ${VITE_API_BASE_URL:-}
         VITE_APP_VERSION: ${APP_VERSION:-7.6.0}
         VITE_GIT_COMMIT: ${GIT_COMMIT:-unknown}
+    environment:
+      SAAS_API_UPSTREAM: ${SAAS_API_UPSTREAM:-http://host.docker.internal:8000}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     ports:
       - "127.0.0.1:${SAAS_FRONTEND_PORT:-8080}:80"
     depends_on:
-      saas-api:
-        condition: service_healthy
+      saas-migrate:
+        condition: service_completed_successfully
     restart: unless-stopped
     logging: *saas-logging
 
 volumes:
   saas_postgres_data:
     name: browser-use-webui_saas_postgres_data
-  browser_profiles:
-  saas_artifacts:

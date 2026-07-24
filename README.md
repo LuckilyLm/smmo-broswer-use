@@ -1,6 +1,7 @@
 <img src="./assets/web-ui.png" alt="Browser Use Web UI" width="full"/>
 
 Multi-tenant SaaS production deployment: [docs/saas-production-deployment.md](docs/saas-production-deployment.md).
+Tenant administration, plans, quota, audit, and notifications: [docs/saas-productization.md](docs/saas-productization.md).
 
 <br/>
 
@@ -19,6 +20,8 @@ The repository includes a multi-tenant Facebook lead discovery service under `sr
 
 Safety is fixed for this phase: every scheduler and worker execution uses `send_disabled=true`. The system may scan, analyze, build a reply plan, and persist leads, but it does not execute the plan or send a Facebook reply.
 
+Production intent is explicit through `SAAS_DEPLOYMENT_MODE`. Use `windows-local` only when API, Worker, Browser Runtime, and Chrome share one Windows host. The Docker production stack defaults to `control-plane-only`, where browser runtime operations and Campaign execution fail explicitly instead of attempting container-local CDP.
+
 ### Local setup
 
 1. Copy `.env.example` to `.env`, set `POSTGRES_PASSWORD`, and optionally set `DATABASE_URL` explicitly.
@@ -32,6 +35,7 @@ Safety is fixed for this phase: every scheduler and worker execution uses `send_
 
    ```powershell
    py scripts\saas_migrate.py
+   py scripts\saas_seed_plans.py
    py scripts\saas_seed_demo.py
    ```
 
@@ -196,6 +200,16 @@ TARGETPLATFORM=linux/arm64 docker compose up --build
 - VNC Viewer (for watching browser interactions): Open `http://localhost:6080/vnc.html`
   - Default VNC password: "youvncpassword"
   - Can be changed by setting `VNC_PASSWORD` in your `.env` file
+
+## Browser Runtime Deployment Boundary
+
+The SaaS control plane can run PostgreSQL, migrations, Nginx/frontend, and non-browser API operations in Docker. The current Facebook runtime cannot control a Windows Chrome process through container-local `localhost`: `SAAS_RUNTIME_HOST=local` inside Linux means Linux-container-local, not the Windows host.
+
+For the currently supported real-browser topology, run the API, Worker, Browser Runtime, and Chrome on the Windows host against the same PostgreSQL database. Scheduler may run on Docker or Windows only after a Windows Worker is online. `windows-agent` is a guarded future boundary and returns `501 not_implemented` for runtime controls; no remote runtime agent exists yet. The production Compose file therefore starts the control plane only by default and does not claim that Facebook browser automation is available after `docker compose up`.
+
+Every SaaS execution remains analysis-only with `send_disabled=true`; no deployment path executes reply batch commands.
+
+For the supported Windows host browser topology, Docker control plane, and validation steps, see the [Windows-local SaaS deployment guide](docs/windows-local-deployment.md).
 
 ## Changelog
 - [x] **2025/01/26:** Thanks to @vvincent1234. Now browser-use-webui can combine with DeepSeek-r1 to engage in deep thinking!
