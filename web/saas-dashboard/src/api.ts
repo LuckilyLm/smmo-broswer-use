@@ -1,3 +1,5 @@
+import type { Campaign, PaginatedResponse, PlatformAccount, RuntimeCapabilities } from "./types";
+
 export type ApiRecord = Record<string, any>;
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL || "";
@@ -47,3 +49,19 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
   }
   return response.status === 204 ? ({} as T) : ((await response.json()) as T);
 }
+
+export const campaignApi = {
+  list: (limit = 50, offset = 0) =>
+    apiGet<PaginatedResponse<Campaign>>(`/api/campaigns?limit=${limit}&offset=${offset}`),
+  run: (campaignId: string) => apiPost<{ execution_id: string }>(`/api/campaigns/${campaignId}/run`)
+};
+
+export const runtimeApi = {
+  capabilities: () => apiGet<RuntimeCapabilities>("/api/system/runtime-capabilities"),
+  connect: (accountId: string) => apiPost(`/api/platform-accounts/${accountId}/connect`),
+  restart: (accountId: string) => apiPost(`/api/platform-accounts/${accountId}/restart-runtime`)
+};
+
+export const platformAccountApi = {
+  list: () => apiGet<PlatformAccount[]>("/api/platform-accounts")
+};
