@@ -194,11 +194,13 @@ workflow
 # Local agent/development artifacts
 .claude/
 IMPLEMENTATION_PLAN.md
+docs/superpowers/
 
 # Generated runtime artifacts
 /artifacts
 /backups/
 /.playwright-cli/
+/output/
 
 # Frontend generated artifacts
 web/saas-dashboard/node_modules/
