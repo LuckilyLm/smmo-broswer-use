@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import argparse
-import os
 import sys
 import signal
 import threading
@@ -18,6 +17,7 @@ from src.facebook_leads.saas.scheduler import CampaignScheduler
 from src.facebook_leads.saas.service import SaaSService
 from src.facebook_leads.saas.storage import SaaSStorage
 from src.facebook_leads.saas.logging import configure_logging
+from src.facebook_leads.saas.config import ProductionConfig
 
 
 def main() -> None:
@@ -26,9 +26,16 @@ def main() -> None:
     parser.add_argument("--poll-seconds", type=float, default=30.0)
     args = parser.parse_args()
 
-    service = SaaSService(SaaSStorage(os.getenv("DATABASE_URL"), create_schema=False))
-    scheduler = CampaignScheduler(service)
-    logger = configure_logging("scheduler", os.getenv("LOG_LEVEL", "INFO"))
+    config = ProductionConfig.from_env()
+    service = SaaSService(
+        SaaSStorage(config.database_url, create_schema=False),
+        max_queued_executions_per_tenant=config.max_queued_executions_per_tenant,
+        session_ttl_hours=config.session_ttl_hours,
+        session_idle_timeout_hours=config.session_idle_timeout_hours,
+        config=config,
+    )
+    scheduler = CampaignScheduler(service, queue_full_retry_minutes=config.scheduler_queue_full_retry_minutes)
+    logger = configure_logging("scheduler", config.log_level)
     stop_event = threading.Event()
     signal.signal(signal.SIGTERM, lambda *_args: stop_event.set())
     signal.signal(signal.SIGINT, lambda *_args: stop_event.set())

@@ -6,11 +6,11 @@ import shutil
 import socket
 import subprocess
 import time
-from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Awaitable, Callable, Iterator
+from typing import Any, Awaitable, Callable
 from urllib.error import URLError
 from urllib.request import urlopen
+from sqlalchemy.exc import IntegrityError
 
 from src.facebook_leads.facebook.orchestrator import default_health_check
 
@@ -36,11 +36,18 @@ class BrowserRuntimeRegistry:
         profiles_root: str | Path = "data/browser_profiles",
         chrome_executable: str | None = None,
         login_checker: LoginChecker | None = None,
+        cdp_port_start: int = 9300,
+        cdp_port_end: int = 9399,
+        runtime_host: str = "local",
+        allow_chrome_discovery: bool = True,
     ) -> None:
         self.storage = storage
         self.profiles_root = Path(profiles_root)
-        self.chrome_executable = chrome_executable or os.getenv("SAAS_CHROME_EXECUTABLE") or _find_chrome()
+        self.chrome_executable = chrome_executable or (_find_chrome() if allow_chrome_discovery else None)
         self.login_checker = login_checker or _default_login_checker
+        self.cdp_port_start = cdp_port_start
+        self.cdp_port_end = cdp_port_end
+        self.runtime_host = runtime_host
 
     def get_runtime(self, context: TenantContext, account_id: str) -> dict[str, Any] | None:
         return self.storage.find_one("browser_runtimes", {"tenant_id": context.tenant_id, "platform_account_id": account_id})
@@ -49,31 +56,43 @@ class BrowserRuntimeRegistry:
         return self.storage.get_by_id("browser_runtimes", runtime_id, tenant_id=context.tenant_id)
 
     def create_runtime(self, context: TenantContext, account_id: str) -> dict[str, Any]:
+        self._require_local_runtime()
         existing = self.get_runtime(context, account_id)
         if existing:
             return existing
         account = self.storage.get_by_id("platform_accounts", account_id, tenant_id=context.tenant_id)
         if not account:
             raise BrowserRuntimeError("platform_account_not_found", "platform account not found")
-        cdp_port = self.allocate_port()
         profile_path = self.profile_path(context.tenant_id, account_id)
         profile_path.mkdir(parents=True, exist_ok=True)
-        runtime = self.storage.insert(
-            "browser_runtimes",
-            {
-                "tenant_id": context.tenant_id,
-                "platform_account_id": account_id,
-                "runtime_type": "local_chrome_cdp",
-                "status": "stopped",
-                "profile_path": str(profile_path),
-                "cdp_port": cdp_port,
-                "cdp_url": f"http://127.0.0.1:{cdp_port}",
-            },
-        )
+        runtime = None
+        for _attempt in range(5):
+            cdp_port = self.allocate_port()
+            try:
+                runtime = self.storage.insert(
+                    "browser_runtimes",
+                    {
+                        "tenant_id": context.tenant_id,
+                        "platform_account_id": account_id,
+                        "runtime_type": "local_chrome_cdp",
+                        "status": "stopped",
+                        "profile_path": str(profile_path),
+                        "cdp_port": cdp_port,
+                        "cdp_url": f"http://127.0.0.1:{cdp_port}",
+                    },
+                )
+                break
+            except IntegrityError:
+                existing = self.get_runtime(context, account_id)
+                if existing:
+                    return existing
+        if runtime is None:
+            raise BrowserRuntimeError("cdp_port_allocation_conflict", "could not reserve a CDP port after 5 attempts")
         self.storage.update_by_id("platform_accounts", account_id, {"browser_runtime_id": runtime["id"]}, tenant_id=context.tenant_id)
         return runtime
 
     def start_runtime(self, context: TenantContext, account_id: str, *, url: str = "https://www.facebook.com/") -> dict[str, Any]:
+        self._require_local_runtime()
         runtime = self.create_runtime(context, account_id)
         self.reconcile_runtime(context, runtime["id"])
         runtime = self.get_runtime_by_id(context, runtime["id"]) or runtime
@@ -110,6 +129,7 @@ class BrowserRuntimeRegistry:
         return updated or runtime
 
     def stop_runtime(self, context: TenantContext, account_id: str) -> dict[str, Any]:
+        self._require_local_runtime()
         runtime = self.get_runtime(context, account_id)
         if not runtime:
             raise BrowserRuntimeError("runtime_not_found", "runtime not found")
@@ -128,6 +148,7 @@ class BrowserRuntimeRegistry:
         return self.start_runtime(context, account_id)
 
     def reset_profile(self, context: TenantContext, account_id: str, *, confirm: str) -> dict[str, Any]:
+        self._require_local_runtime()
         if confirm != "RESET PROFILE":
             raise BrowserRuntimeError("confirmation_required", "reset profile requires exact confirmation")
         runtime = self.get_runtime(context, account_id)
@@ -162,6 +183,7 @@ class BrowserRuntimeRegistry:
         return {"reachable": reachable, "status": status, "runtime": safe_runtime(updated or runtime)}
 
     async def check_login(self, context: TenantContext, account_id: str) -> dict[str, Any]:
+        self._require_local_runtime()
         runtime = self.get_runtime(context, account_id)
         if not runtime:
             raise BrowserRuntimeError("runtime_not_found", "runtime not found")
@@ -214,15 +236,17 @@ class BrowserRuntimeRegistry:
         return reconciled
 
     def allocate_port(self) -> int:
-        start = int(os.getenv("SAAS_BROWSER_CDP_PORT_START", "9300"))
-        end = int(os.getenv("SAAS_BROWSER_CDP_PORT_END", "9399"))
         used = {int(row["cdp_port"]) for row in self.storage.list("browser_runtimes", limit=1000)}
-        for port in range(start, end + 1):
+        for port in range(self.cdp_port_start, self.cdp_port_end + 1):
             if port in used:
                 continue
             if _port_free(port):
                 return port
         raise BrowserRuntimeError("no_available_cdp_port", "no available CDP port")
+
+    def _require_local_runtime(self) -> None:
+        if self.runtime_host != "local":
+            raise BrowserRuntimeError("runtime_host_not_implemented", "windows-agent runtime host is not implemented")
 
     def profile_path(self, tenant_id: str, account_id: str) -> Path:
         return (self.profiles_root / f"tenant_{tenant_id}" / f"platform_account_{account_id}" / "profile").resolve()
@@ -258,25 +282,8 @@ def safe_account(account: dict[str, Any]) -> dict[str, Any]:
 
 
 async def _default_login_checker(cdp_url: str) -> str:
-    with scoped_browser_cdp(cdp_url):
-        result = await default_health_check()
+    result = await default_health_check(cdp_url=cdp_url)
     return str(result.get("login_state") or "unknown")
-
-
-@contextmanager
-def scoped_browser_cdp(cdp_url: str) -> Iterator[None]:
-    keys = ["BROWSER_CDP", "FACEBOOK_CDP_URL"]
-    previous = {key: os.environ.get(key) for key in keys}
-    try:
-        for key in keys:
-            os.environ[key] = cdp_url
-        yield
-    finally:
-        for key, value in previous.items():
-            if value is None:
-                os.environ.pop(key, None)
-            else:
-                os.environ[key] = value
 
 
 def _cdp_reachable(cdp_url: str) -> bool:

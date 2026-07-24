@@ -7,7 +7,7 @@ import time
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 from urllib.parse import urlparse
 
 from .comments import count_comment_candidates, expand_comments, find_comment_root, locate_comment_node
@@ -987,12 +987,17 @@ async def dismiss_safe_obstructions(page, *, max_attempts: int = 3) -> dict[str,
     for _ in range(max_attempts):
         clicked = False
         for label in labels:
-            locator = page.get_by_role("button", name=label) if hasattr(page, "get_by_role") else None
-            count = await _safe_count(locator) if locator is not None else 0
+            if not hasattr(page, "get_by_role"):
+                continue
+            locator = cast(Any, page.get_by_role("button", name=label))
+            count = await _safe_count(locator)
             attempts.append({"strategy": "safe_button_label", "matched_count": count})
             if 1 <= count <= 3:
                 try:
-                    await locator.first.click(timeout=1500)
+                    first = locator.first
+                    if first is None:
+                        continue
+                    await first.click(timeout=1500)
                     dismissed += 1
                     clicked = True
                     await short_stability_wait(page)

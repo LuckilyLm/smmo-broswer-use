@@ -6,7 +6,6 @@ from typing import Any, Awaitable, Callable
 
 from src.facebook_leads.facebook.orchestrator import FacebookLeadsRunConfig, run_facebook_leads_job
 from src.facebook_leads.facebook.target_policy import build_target_policy_config
-from src.facebook_leads.saas.runtime import scoped_browser_cdp
 
 
 @dataclass(frozen=True)
@@ -72,6 +71,7 @@ class FacebookProvider(BasePlatformProvider):
 
     async def run_campaign(self, request: ProviderRunRequest) -> dict[str, Any]:
         config = FacebookLeadsRunConfig(
+            cdp_url=request.run_context.cdp_url if request.run_context else None,
             keyword=request.keyword,
             max_contents=request.max_contents,
             max_comments=request.max_comments,
@@ -83,11 +83,7 @@ class FacebookProvider(BasePlatformProvider):
             runs_root=request.runs_root,
             target_policy=build_target_policy_config(policy=request.target_policy),
         )
-        if request.run_context is None:
-            result = await self.runner(config)
-        else:
-            with scoped_browser_cdp(request.run_context.cdp_url):
-                result = await self.runner(config)
+        result = await self.runner(config)
         result["send_disabled"] = True
         return result
 

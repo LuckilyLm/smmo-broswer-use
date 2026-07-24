@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import replace
-from typing import Any
+from typing import Any, cast
 from urllib.parse import parse_qs, urlparse
 
 from .models import FacebookContentCandidate, FacebookContentType
@@ -227,7 +227,7 @@ def _author_from_title(value: Any) -> str | None:
 
 def _valid_content_type(value: str | None) -> FacebookContentType:
     if value in {"post", "reel", "video"}:
-        return value
+        return cast(FacebookContentType, value)
     return "unknown"
 
 

@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import os
 import socket
 from datetime import timedelta
 from typing import Any
@@ -11,26 +10,47 @@ from .service import SaaSService
 
 
 class ExecutionWorker:
-    def __init__(self, service: SaaSService, *, worker_id: str | None = None) -> None:
+    def __init__(
+        self,
+        service: SaaSService,
+        *,
+        worker_id: str | None = None,
+        heartbeat_interval_seconds: float = 15,
+        queue_stale_seconds: int = 21600,
+        heartbeat_stale_seconds: int = 60,
+    ) -> None:
         self.service = service
         self.worker_id = worker_id or f"{socket.gethostname()}-worker"
+        self.heartbeat_interval_seconds = heartbeat_interval_seconds
+        self.queue_stale_seconds = queue_stale_seconds
+        self.heartbeat_stale_seconds = heartbeat_stale_seconds
 
     async def tick(self) -> dict[str, Any] | None:
         self.heartbeat(status="polling")
-        stale_seconds = int(os.getenv("SAAS_QUEUE_STALE_SECONDS", "21600"))
-        heartbeat_seconds = int(os.getenv("SAAS_HEARTBEAT_STALE_SECONDS", "60"))
-        self.service.storage.fail_stale_queue_items(
-            stale_before=utc_now() - timedelta(seconds=stale_seconds),
-            heartbeat_stale_before=utc_now() - timedelta(seconds=heartbeat_seconds),
+        self.service.storage.queue.recover_stale(
+            stale_before=utc_now() - timedelta(seconds=self.queue_stale_seconds),
+            heartbeat_stale_before=utc_now() - timedelta(seconds=self.heartbeat_stale_seconds),
+            retry_analysis_only=True,
         )
-        item = self.service.storage.claim_queue_item(worker_id=self.worker_id)
+        item = self.service.storage.queue.claim(worker_id=self.worker_id)
         if not item:
             return None
         self.heartbeat(status="running", current_queue_item_id=item["id"])
+        heartbeat_stop = asyncio.Event()
+        heartbeat_task = asyncio.create_task(self._heartbeat_during_run(item["id"], heartbeat_stop))
         try:
             return await self.service.run_queue_item(item)
         finally:
+            heartbeat_stop.set()
+            await heartbeat_task
             self.heartbeat(status="online", current_queue_item_id=None)
+
+    async def _heartbeat_during_run(self, queue_item_id: str, stop_event: asyncio.Event) -> None:
+        while not stop_event.is_set():
+            try:
+                await asyncio.wait_for(stop_event.wait(), timeout=self.heartbeat_interval_seconds)
+            except TimeoutError:
+                self.heartbeat(status="running", current_queue_item_id=queue_item_id)
 
     async def run_forever(self, *, poll_seconds: float = 5.0, stop_event: asyncio.Event | None = None) -> None:
         stop_event = stop_event or asyncio.Event()

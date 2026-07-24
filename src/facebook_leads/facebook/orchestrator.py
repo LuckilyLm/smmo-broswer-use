@@ -40,6 +40,7 @@ DEFAULT_LOCK_TIMEOUT_MINUTES = 120
 
 @dataclass(frozen=True)
 class FacebookLeadsRunConfig:
+    cdp_url: str | None = None
     keyword: str | None = None
     max_contents: int = 3
     max_comments: int = 50
@@ -119,7 +120,7 @@ async def run_facebook_leads_job(config: FacebookLeadsRunConfig, deps: Orchestra
 
     try:
         _write_state(state_path, state, stage="browser_check")
-        health = await _with_retry(lambda: _call_health_check(deps), retryable_errors=(BrowserCdpNotConfiguredError, ConnectionError, TimeoutError))
+        health = await _with_retry(lambda: _call_health_check(deps, config), retryable_errors=(BrowserCdpNotConfiguredError, ConnectionError, TimeoutError))
         if health.get("login_state") != "logged_in":
             result = _blocked_result(
                 config,
@@ -162,6 +163,8 @@ async def run_facebook_leads_job(config: FacebookLeadsRunConfig, deps: Orchestra
         else:
             paths.update(state.get("paths") or {})
             log("resume: using existing scan and lead report")
+        if lead_report_path is None:
+            raise RuntimeError("lead report path is missing")
 
         enriched: dict[str, Any] = {}
         plan_source_path = lead_report_path
@@ -253,8 +256,8 @@ class JobLock:
             self.path.unlink(missing_ok=True)
 
 
-async def default_health_check() -> dict[str, Any]:
-    cdp_url = require_browser_cdp()
+async def default_health_check(*, cdp_url: str | None = None) -> dict[str, Any]:
+    cdp_url = require_browser_cdp(cdp_url=cdp_url)
     window_w, window_h = get_browser_window_size()
     from browser_use.browser.browser import BrowserConfig
     from browser_use.browser.context import BrowserContextConfig
@@ -264,11 +267,10 @@ async def default_health_check() -> dict[str, Any]:
         config=BrowserConfig(
             cdp_url=cdp_url,
             headless=False,
-            keep_alive=True,
-            new_context_config=BrowserContextConfig(keep_alive=True, window_width=window_w, window_height=window_h),
+            new_context_config=BrowserContextConfig(window_width=window_w, window_height=window_h),
         )
     )
-    context = await browser.new_context(BrowserContextConfig(keep_alive=True, force_new_context=False, window_width=window_w, window_height=window_h))
+    context = await browser.new_context(BrowserContextConfig(force_new_context=False, window_width=window_w, window_height=window_h))
     page = await select_active_or_facebook_page(context)
     return {"cdp_url_configured": True, "cdp_reachable": True, "login_state": await detect_login_state(page), "url": getattr(page, "url", None)}
 
@@ -288,6 +290,7 @@ async def default_scan(config: FacebookLeadsRunConfig, run_dir: Path) -> dict[st
         output=str(run_dir / "scan_result.json"),
         artifacts_dir=str(run_dir / "logs"),
         resume_scan_result=str(previous_scan_path) if config.resume_run_id else None,
+        cdp_url=config.cdp_url,
     )
     scan_payload = await run_cli_scan(scan_args)
     report = build_lead_report(scan_payload)
@@ -334,12 +337,13 @@ def default_build_plan(lead_report_path: Path, config: FacebookLeadsRunConfig, r
 
 
 def build_config_from_env(args: argparse.Namespace, env: dict[str, str] | None = None) -> FacebookLeadsRunConfig:
-    env = env or os.environ
+    env = dict(env or os.environ)
     llm_review = _resolve_bool(getattr(args, "llm_review", None), getattr(args, "no_llm_review", False), env.get("FACEBOOK_LEADS_RUN_LLM_REVIEW", "true"))
     resume_id = getattr(args, "resume", None)
     default_keyword = None if resume_id else "car detailing"
     target_policy = _target_policy_from_args(args, env)
     return FacebookLeadsRunConfig(
+        cdp_url=_pick(getattr(args, "cdp_url", None), env.get("FACEBOOK_CDP_URL"), env.get("BROWSER_CDP"), None),
         keyword=_pick(getattr(args, "keyword", None), env.get("FACEBOOK_LEADS_RUN_KEYWORD"), default_keyword),
         max_contents=int(_pick(getattr(args, "max_contents", None), env.get("FACEBOOK_LEADS_RUN_MAX_CONTENTS"), 3)),
         max_comments=int(_pick(getattr(args, "max_comments", None), env.get("FACEBOOK_LEADS_RUN_MAX_COMMENTS"), 50)),
@@ -373,8 +377,10 @@ def exit_code_for_result(result: dict[str, Any]) -> int:
     return {"completed": 0, "blocked": 2, "partial": 3, "failed": 4}.get(str(result.get("status")), 4)
 
 
-async def _call_health_check(deps: OrchestratorDeps) -> dict[str, Any]:
-    return await (deps.health_check or default_health_check)()
+async def _call_health_check(deps: OrchestratorDeps, config: FacebookLeadsRunConfig) -> dict[str, Any]:
+    if deps.health_check:
+        return await deps.health_check()
+    return await default_health_check(cdp_url=config.cdp_url)
 
 
 async def _call_scan(deps: OrchestratorDeps, config: FacebookLeadsRunConfig, run_dir: Path) -> dict[str, Any]:
@@ -681,6 +687,8 @@ def _scan_status(scan_payload: dict[str, Any]) -> str:
 
 def _scan_metric(scan_payload: dict[str, Any], report: dict[str, Any], key: str, report_key: str | None) -> int:
     scan = scan_payload.get("scan") if "scan" in scan_payload else scan_payload
+    if not isinstance(scan, dict):
+        scan = {}
     if key in scan:
         return int(scan.get(key) or 0)
     diagnostics = scan.get("diagnostics") or {}

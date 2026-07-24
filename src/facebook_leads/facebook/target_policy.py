@@ -57,7 +57,7 @@ def build_target_policy_config(
 
 
 def target_policy_from_env(env: dict[str, str] | None = None) -> TargetPolicyConfig:
-    env = env or os.environ
+    env = dict(env or os.environ)
     owned = _split_env_list(env.get("FACEBOOK_LEADS_OWNED_SOURCE_IDS"))
     allowed = _split_env_list(env.get("FACEBOOK_LEADS_ALLOWED_SOURCE_URLS"))
     owned.extend(_owned_sources_from_file(Path("config/facebook_owned_sources.json")))

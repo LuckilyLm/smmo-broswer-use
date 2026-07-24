@@ -31,6 +31,7 @@ from src.facebook_leads.facebook.orchestrator import (  # noqa: E402
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Run one Facebook Leads Phase 6 analysis and batch-plan job. No replies are sent.")
+    parser.add_argument("--cdp-url", default=None)
     parser.add_argument("--keyword", default=None)
     parser.add_argument("--max-contents", type=int, default=None)
     parser.add_argument("--max-comments", type=int, default=None)

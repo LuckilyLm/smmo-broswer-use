@@ -27,7 +27,7 @@ from src.facebook_leads.facebook.scanner import run_readonly_scan  # noqa: E402
 
 async def run_cli_scan(args: argparse.Namespace) -> dict:
     total_started = time.perf_counter()
-    cdp_url = require_browser_cdp()
+    cdp_url = require_browser_cdp(cdp_url=getattr(args, "cdp_url", None))
     window_w, window_h = get_browser_window_size()
     artifact_dir = create_diagnostic_dir(args.artifacts_dir)
     result_path = artifact_dir / "result.json"
@@ -96,6 +96,7 @@ def build_parser() -> argparse.ArgumentParser:
         )
     )
     parser.add_argument("--keyword", default=None)
+    parser.add_argument("--cdp-url", default=None)
     parser.add_argument("--content-limit", type=int, default=5)
     parser.add_argument("--comment-limit", type=int, default=100)
     parser.add_argument("--max-scrolls", type=int, default=5)

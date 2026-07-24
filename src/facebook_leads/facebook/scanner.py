@@ -2,14 +2,14 @@ from __future__ import annotations
 
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from .comments import count_comment_candidates, expand_comments, extract_comments, find_comment_root, wait_for_comments_loaded
 from .content import open_content
 from .diagnostics import write_json
 from .content_metadata import extract_content_metadata
 from .login_state import detect_login_state
-from .models import FacebookComment, FacebookContentCandidate, FacebookScanResult
+from .models import FacebookComment, FacebookContentCandidate, FacebookLoginState, FacebookScanResult
 from .search import discover_content_candidates, is_candidate_content_url, search_facebook_contents
 
 
@@ -82,14 +82,15 @@ async def run_readonly_scan(
                     "current-page-only requires a Facebook post, Reel, video, or permalink URL",
                     discovered_contents=discovered_contents,
                 )
-            discovered_contents = [
-                FacebookContentCandidate(
-                    url=active_url,
-                    content_type="unknown",
-                    discovered_from="current_page",
-                    discovery_index=0,
-                )
-            ]
+            if active_url:
+                discovered_contents = [
+                    FacebookContentCandidate(
+                        url=active_url,
+                        content_type="unknown",
+                        discovered_from="current_page",
+                        discovery_index=0,
+                    )
+                ]
         else:
             if not keyword:
                 raise ValueError("--keyword is required unless --current-page-only is used")
@@ -273,13 +274,14 @@ def _result(
     content_failure_count = int(diagnostics.get("content_failure_count") or len(diagnostics.get("content_failures") or []))
     content_success_count = int(diagnostics.get("content_success_count") or len(contents))
     status = stage if stage in {"completed", "partial", "failed"} else ("completed" if success else "failed")
+    normalized_login_state = cast(FacebookLoginState, login_state) if login_state in {"logged_in", "logged_out", "checkpoint", "captcha", "unknown"} else "unknown"
     return FacebookScanResult(
         success=success,
         stage=stage,
         status=status,
         partial=status == "partial",
         keyword=keyword,
-        login_state=login_state,
+        login_state=normalized_login_state,
         active_page_url=active_page_url,
         discovered_contents=discovered_contents or [],
         contents=contents,

@@ -1,13 +1,10 @@
 from __future__ import annotations
 
-import json
 from pathlib import Path
 from typing import Any
 
-from sqlalchemy import and_, insert, select, update
-from sqlalchemy.dialects.postgresql import insert as pg_insert
-
-from .db import TABLES, utc_now
+from .db import utc_now
+from .artifacts import load_json_safe
 from .storage import SaaSStorage, _prepare_payload
 
 
@@ -22,6 +19,9 @@ def persist_orchestrator_result(
     execution_id: str | None = None,
     execution_keyword_id: str | None = None,
     keyword: str | None = None,
+    attempt_number: int = 1,
+    input_cost_per_1m: float | None = None,
+    output_cost_per_1m: float | None = None,
 ) -> dict[str, Any]:
     scan = result.get("scan_summary") or {}
     plan = result.get("batch_plan_summary") or {}
@@ -44,33 +44,48 @@ def persist_orchestrator_result(
             "error_type": result.get("error_type"),
             "error_message": result.get("error_message"),
     }
-    if execution_id:
-        execution_payload = storage.get_by_id("executions", execution_id, tenant_id=tenant_id) or {"id": execution_id, **execution_data}
-    else:
-        execution_payload = _prepare_payload("executions", execution_data)
-        storage.insert("executions", execution_payload)
     report = _load_report(result)
     review = result.get("llm_review_summary") or {}
-    for raw in _iter_report_leads(report):
-        storage.upsert_lead(_lead_payload(raw, tenant_id, campaign_id, platform_account_id, platform, result, keyword=keyword))
-    if review:
-        storage.insert(
-            "token_usage",
-            {
-                "tenant_id": tenant_id,
-                "campaign_id": campaign_id,
-                "execution_id": execution_payload["id"],
-                "execution_keyword_id": execution_keyword_id,
-                "provider": platform,
-                "model": review.get("model"),
-                "prompt_tokens": review.get("prompt_tokens"),
-                "completion_tokens": review.get("completion_tokens"),
-                "total_tokens": review.get("total_tokens"),
-                "request_count": review.get("call_count"),
-                "estimated_cost": None,
-            },
-        )
-    return storage.get_by_id("executions", execution_payload["id"]) or execution_payload
+    with storage.transaction() as session:
+        if execution_id:
+            execution_payload = storage.get_by_id("executions", execution_id, tenant_id=tenant_id, session=session)
+            if execution_payload:
+                execution_payload = storage.update_by_id("executions", execution_id, execution_data, tenant_id=tenant_id, session=session) or execution_payload
+            else:
+                execution_payload = storage.insert("executions", {"id": execution_id, **execution_data}, session=session)
+        else:
+            execution_payload = storage.insert("executions", _prepare_payload("executions", execution_data), session=session)
+        for raw in _iter_report_leads(report):
+            storage.upsert_lead(
+                _lead_payload(raw, tenant_id, campaign_id, platform_account_id, platform, result, keyword=keyword),
+                session=session,
+            )
+        if review:
+            token_payload = {
+                    "tenant_id": tenant_id,
+                    "campaign_id": campaign_id,
+                    "execution_id": execution_payload["id"],
+                    "execution_keyword_id": execution_keyword_id,
+                    "provider": platform,
+                    "model": review.get("model"),
+                    "prompt_tokens": review.get("prompt_tokens"),
+                    "completion_tokens": review.get("completion_tokens"),
+                    "total_tokens": review.get("total_tokens"),
+                    "request_count": review.get("call_count"),
+                    "estimated_cost": _estimated_cost(review, input_cost_per_1m, output_cost_per_1m),
+                    "elapsed_ms": int(review.get("elapsed_ms") or result.get("llm_elapsed_ms") or 0) or None,
+                    "attempt_number": attempt_number,
+            }
+            existing_usage = (
+                storage.find_one("token_usage", {"execution_keyword_id": execution_keyword_id})
+                if execution_keyword_id
+                else None
+            )
+            if existing_usage:
+                storage.upsert_token_usage(token_payload, session=session)
+            else:
+                storage.insert("token_usage", token_payload, session=session)
+        return storage.get_by_id("executions", execution_payload["id"], session=session) or execution_payload
 
 
 def _lead_payload(raw: dict[str, Any], tenant_id: str, campaign_id: str, platform_account_id: str, platform: str, result: dict[str, Any], *, keyword: str | None = None) -> dict[str, Any]:
@@ -90,6 +105,12 @@ def _lead_payload(raw: dict[str, Any], tenant_id: str, campaign_id: str, platfor
         "source_content_url": raw.get("source_content_url"),
         "direct_comment_url": raw.get("direct_comment_url"),
         "rule_intent_level": raw.get("rule_intent_level") or raw.get("intent_level"),
+        "final_intent_level": (
+            review.get("intent_level")
+            or raw.get("final_intent_level")
+            or raw.get("rule_intent_level")
+            or raw.get("intent_level")
+        ),
         "llm_confidence": review.get("confidence"),
         "llm_intent_level": review.get("intent_level") or raw.get("final_intent_level"),
         "llm_intent_types": review.get("intent_types") or raw.get("final_intent_types") or [],
@@ -110,7 +131,7 @@ def _load_report(result: dict[str, Any]) -> dict[str, Any]:
     for key in ("lead_report_enriched_json", "lead_report_json"):
         path = paths.get(key)
         if path and Path(path).exists():
-            return json.loads(Path(path).read_text(encoding="utf-8"))
+            return load_json_safe(path, default={})
     return result.get("lead_report") or {}
 
 
@@ -118,3 +139,11 @@ def _iter_report_leads(report: dict[str, Any]):
     for content in report.get("contents") or []:
         for lead in content.get("leads") or []:
             yield lead
+
+
+def _estimated_cost(review: dict[str, Any], input_cost: float | None, output_cost: float | None) -> float | None:
+    if input_cost is None or output_cost is None:
+        return None
+    prompt_tokens = int(review.get("prompt_tokens") or 0)
+    completion_tokens = int(review.get("completion_tokens") or 0)
+    return (prompt_tokens * input_cost + completion_tokens * output_cost) / 1_000_000

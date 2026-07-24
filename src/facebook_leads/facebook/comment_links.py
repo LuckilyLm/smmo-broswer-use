@@ -51,7 +51,7 @@ def extract_comment_permalink_from_node(node: Any) -> str | None:
     if not links:
         return None
 
-    normalized = [_link_url(link) for link in links]
+    normalized = [url for link in links if isinstance((url := _link_url(link)), str)]
     candidates = [url for url in normalized if is_comment_permalink(url)]
     if not candidates:
         return None

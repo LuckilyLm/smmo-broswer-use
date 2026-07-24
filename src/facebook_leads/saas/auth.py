@@ -4,13 +4,16 @@ import hashlib
 import hmac
 import os
 
+PBKDF2_ITERATIONS = 310_000
+LEGACY_PBKDF2_ITERATIONS = 120_000
 
-def hash_password(password: str, *, salt: bytes | None = None) -> str:
+
+def hash_password(password: str, *, salt: bytes | None = None, iterations: int = PBKDF2_ITERATIONS) -> str:
     if not password:
         raise ValueError("password is required")
     salt = salt or os.urandom(16)
-    digest = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, 120_000)
-    return f"pbkdf2_sha256$120000${salt.hex()}${digest.hex()}"
+    digest = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, iterations)
+    return f"pbkdf2_sha256${iterations}${salt.hex()}${digest.hex()}"
 
 
 def verify_password(password: str, password_hash: str) -> bool:
@@ -22,3 +25,11 @@ def verify_password(password: str, password_hash: str) -> bool:
         return False
     expected = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), bytes.fromhex(salt_hex), int(iterations)).hex()
     return hmac.compare_digest(expected, digest_hex)
+
+
+def needs_rehash(password_hash: str, *, iterations: int = PBKDF2_ITERATIONS) -> bool:
+    try:
+        algorithm, stored_iterations, _salt_hex, _digest_hex = password_hash.split("$", 3)
+    except ValueError:
+        return True
+    return algorithm != "pbkdf2_sha256" or int(stored_iterations) < iterations

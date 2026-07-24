@@ -8,6 +8,8 @@ import time
 from dataclasses import replace
 from typing import Any
 
+from pydantic import SecretStr
+
 from langchain_core.messages import HumanMessage, SystemMessage
 
 from .intent_models import IntentMatch, LeadCandidate
@@ -296,7 +298,7 @@ def _build_openai_compatible_fallback(
         model=model_name,
         temperature=temperature,
         base_url=resolved_base_url,
-        api_key=resolved_api_key,
+        api_key=SecretStr(resolved_api_key) if resolved_api_key else None,
     )
 
 

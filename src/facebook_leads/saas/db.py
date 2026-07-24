@@ -4,7 +4,7 @@ import os
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Iterator
+from typing import Any, Iterator
 
 from sqlalchemy import (
     Boolean,
@@ -42,6 +42,7 @@ tenants = Table(
     Column("name", String(255), nullable=False),
     Column("slug", String(255), nullable=False, unique=True),
     Column("status", String(50), nullable=False, default="active"),
+    Column("timezone", String(100), nullable=False, default="UTC"),
     Column("default_target_policy", String(50), nullable=False, default="discovery_only"),
     Column("default_min_confidence", Float, nullable=False, default=0.9),
     Column("default_daily_limit", Integer, nullable=False, default=10),
@@ -58,6 +59,7 @@ users = Table(
     Column("display_name", String(255), nullable=False),
     Column("status", String(50), nullable=False, default="active"),
     Column("must_change_password", Boolean, nullable=False, default=False),
+    Column("is_system_admin", Boolean, nullable=False, default=False),
     Column("created_at", DateTime(timezone=True), nullable=False, default=utc_now),
     Column("updated_at", DateTime(timezone=True), nullable=False, default=utc_now),
 )
@@ -134,6 +136,7 @@ campaigns = Table(
     Column("max_leads", Integer, nullable=False, default=5),
     Column("daily_limit", Integer, nullable=False, default=10),
     Column("llm_enabled", Boolean, nullable=False, default=True),
+    Column("deleted_at", DateTime(timezone=True)),
     Column("created_at", DateTime(timezone=True), nullable=False, default=utc_now),
     Column("updated_at", DateTime(timezone=True), nullable=False, default=utc_now),
 )
@@ -205,6 +208,7 @@ leads = Table(
     Column("source_content_url", Text),
     Column("direct_comment_url", Text),
     Column("rule_intent_level", String(50)),
+    Column("final_intent_level", String(50)),
     Column("llm_confidence", Float),
     Column("llm_intent_level", String(50)),
     Column("llm_intent_types", JsonType, nullable=False, default=list),
@@ -242,6 +246,8 @@ executions = Table(
     Column("current_keyword", String(255)),
     Column("progress_percent", Integer, nullable=False, default=0),
     Column("cancel_requested", Boolean, nullable=False, default=False),
+    Column("cancel_requested_at", DateTime(timezone=True)),
+    Column("config_snapshot", JsonType, nullable=False, default=dict),
     Column("scanned_contents", Integer, nullable=False, default=0),
     Column("scanned_comments", Integer, nullable=False, default=0),
     Column("lead_candidates", Integer, nullable=False, default=0),
@@ -267,6 +273,7 @@ execution_queue_items = Table(
     Column("status", String(50), nullable=False, default="queued"),
     Column("priority", Integer, nullable=False, default=100),
     Column("schedule_trigger_key", String(255)),
+    Column("attempt_token", String(64)),
     Column("claimed_by", String(255)),
     Column("queued_at", DateTime(timezone=True), nullable=False, default=utc_now),
     Column("started_at", DateTime(timezone=True)),
@@ -289,6 +296,7 @@ execution_keywords = Table(
     Column("execution_id", String(64), ForeignKey("executions.id", ondelete="CASCADE"), nullable=False),
     Column("campaign_keyword_id", String(64), ForeignKey("campaign_keywords.id", ondelete="SET NULL")),
     Column("keyword", String(255), nullable=False),
+    Column("attempt_number", Integer, nullable=False, default=1),
     Column("status", String(50), nullable=False, default="queued"),
     Column("started_at", DateTime(timezone=True)),
     Column("finished_at", DateTime(timezone=True)),
@@ -305,6 +313,7 @@ execution_keywords = Table(
     Column("error_message", Text),
     Column("created_at", DateTime(timezone=True), nullable=False, default=utc_now),
     Column("updated_at", DateTime(timezone=True), nullable=False, default=utc_now),
+    UniqueConstraint("execution_id", "keyword", name="uq_execution_keywords_execution_keyword"),
 )
 
 token_usage = Table(
@@ -322,6 +331,8 @@ token_usage = Table(
     Column("total_tokens", Integer),
     Column("request_count", Integer),
     Column("estimated_cost", Float),
+    Column("elapsed_ms", Integer),
+    Column("attempt_number", Integer, nullable=False, default=1),
     Column("created_at", DateTime(timezone=True), nullable=False, default=utc_now),
     Column("updated_at", DateTime(timezone=True), nullable=False, default=utc_now),
 )
@@ -345,8 +356,98 @@ sessions = Table(
     Column("id", String(128), primary_key=True),
     Column("user_id", String(64), ForeignKey("users.id", ondelete="CASCADE"), nullable=False),
     Column("tenant_id", String(64), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False),
+    Column("expires_at", DateTime(timezone=True), nullable=False),
+    Column("last_seen_at", DateTime(timezone=True), nullable=False),
+    Column("revoked_at", DateTime(timezone=True)),
     Column("created_at", DateTime(timezone=True), nullable=False, default=utc_now),
     Column("updated_at", DateTime(timezone=True), nullable=False, default=utc_now),
+)
+
+plans = Table(
+    "plans",
+    metadata,
+    Column("id", String(64), primary_key=True),
+    Column("code", String(50), nullable=False, unique=True),
+    Column("name", String(255), nullable=False),
+    Column("description", Text),
+    Column("status", String(50), nullable=False, default="active"),
+    Column("max_users", Integer),
+    Column("max_platform_accounts", Integer),
+    Column("max_campaigns", Integer),
+    Column("max_monthly_executions", Integer),
+    Column("max_monthly_tokens", Integer),
+    Column("max_monthly_leads", Integer),
+    Column("allow_scheduler", Boolean, nullable=False, default=False),
+    Column("allow_multi_keyword", Boolean, nullable=False, default=False),
+    Column("allow_advanced_reports", Boolean, nullable=False, default=False),
+    Column("created_at", DateTime(timezone=True), nullable=False, default=utc_now),
+    Column("updated_at", DateTime(timezone=True), nullable=False, default=utc_now),
+)
+
+tenant_subscriptions = Table(
+    "tenant_subscriptions",
+    metadata,
+    Column("id", String(64), primary_key=True),
+    Column("tenant_id", String(64), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False),
+    Column("plan_id", String(64), ForeignKey("plans.id", ondelete="RESTRICT"), nullable=False),
+    Column("status", String(50), nullable=False, default="active"),
+    Column("started_at", DateTime(timezone=True), nullable=False, default=utc_now),
+    Column("trial_ends_at", DateTime(timezone=True)),
+    Column("current_period_start", DateTime(timezone=True)),
+    Column("current_period_end", DateTime(timezone=True)),
+    Column("overrides_json", JsonType, nullable=False, default=dict),
+    Column("created_at", DateTime(timezone=True), nullable=False, default=utc_now),
+    Column("updated_at", DateTime(timezone=True), nullable=False, default=utc_now),
+    UniqueConstraint("tenant_id", name="uq_tenant_subscriptions_tenant"),
+)
+
+tenant_invitations = Table(
+    "tenant_invitations",
+    metadata,
+    Column("id", String(64), primary_key=True),
+    Column("tenant_id", String(64), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False),
+    Column("email", String(255), nullable=False),
+    Column("role", String(50), nullable=False, default="member"),
+    Column("token_hash", String(64), nullable=False, unique=True),
+    Column("status", String(50), nullable=False, default="pending"),
+    Column("expires_at", DateTime(timezone=True), nullable=False),
+    Column("invited_by_user_id", String(64), ForeignKey("users.id", ondelete="SET NULL")),
+    Column("accepted_by_user_id", String(64), ForeignKey("users.id", ondelete="SET NULL")),
+    Column("created_at", DateTime(timezone=True), nullable=False, default=utc_now),
+    Column("updated_at", DateTime(timezone=True), nullable=False, default=utc_now),
+)
+
+audit_logs = Table(
+    "audit_logs",
+    metadata,
+    Column("id", String(64), primary_key=True),
+    Column("tenant_id", String(64), ForeignKey("tenants.id", ondelete="SET NULL")),
+    Column("user_id", String(64), ForeignKey("users.id", ondelete="SET NULL")),
+    Column("action", String(100), nullable=False),
+    Column("resource_type", String(100), nullable=False),
+    Column("resource_id", String(64)),
+    Column("ip_address", String(64)),
+    Column("user_agent", Text),
+    Column("metadata_json", JsonType, nullable=False, default=dict),
+    Column("created_at", DateTime(timezone=True), nullable=False, default=utc_now),
+)
+
+notifications = Table(
+    "notifications",
+    metadata,
+    Column("id", String(64), primary_key=True),
+    Column("tenant_id", String(64), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False),
+    Column("user_id", String(64), ForeignKey("users.id", ondelete="CASCADE")),
+    Column("type", String(100), nullable=False),
+    Column("severity", String(50), nullable=False, default="info"),
+    Column("title", String(255), nullable=False),
+    Column("message", Text, nullable=False),
+    Column("resource_type", String(100)),
+    Column("resource_id", String(64)),
+    Column("dedupe_key", String(255)),
+    Column("read_at", DateTime(timezone=True)),
+    Column("created_at", DateTime(timezone=True), nullable=False, default=utc_now),
+    UniqueConstraint("tenant_id", "dedupe_key", name="uq_notifications_tenant_dedupe"),
 )
 
 Index("ix_leads_tenant_created_at", leads.c.tenant_id, leads.c.created_at)
@@ -363,6 +464,19 @@ Index("ix_browser_runtimes_tenant_account", browser_runtimes.c.tenant_id, browse
 Index("ix_browser_runtimes_tenant_status", browser_runtimes.c.tenant_id, browser_runtimes.c.status)
 Index("ix_queue_status_run_after", execution_queue_items.c.status, execution_queue_items.c.run_after, execution_queue_items.c.priority)
 Index("ix_execution_keywords_execution", execution_keywords.c.execution_id)
+Index("ix_subscriptions_tenant_status", tenant_subscriptions.c.tenant_id, tenant_subscriptions.c.status)
+Index("ix_invitations_tenant_status", tenant_invitations.c.tenant_id, tenant_invitations.c.status)
+Index("ix_audit_tenant_created", audit_logs.c.tenant_id, audit_logs.c.created_at)
+Index("ix_audit_tenant_action", audit_logs.c.tenant_id, audit_logs.c.action)
+Index("ix_notifications_tenant_created", notifications.c.tenant_id, notifications.c.created_at)
+Index("ix_notifications_tenant_read", notifications.c.tenant_id, notifications.c.read_at)
+Index(
+    "uq_token_usage_execution_keyword",
+    token_usage.c.execution_keyword_id,
+    unique=True,
+    postgresql_where=token_usage.c.execution_keyword_id.is_not(None),
+    sqlite_where=token_usage.c.execution_keyword_id.is_not(None),
+)
 
 TABLES = {
     table.name: table
@@ -383,6 +497,11 @@ TABLES = {
         token_usage,
         worker_heartbeats,
         sessions,
+        plans,
+        tenant_subscriptions,
+        tenant_invitations,
+        audit_logs,
+        notifications,
     ]
 }
 
@@ -406,7 +525,7 @@ def resolve_database_url(database_url: str | None = None, *, sqlite_path: str | 
 
 
 def create_saas_engine(database_url: str) -> Engine:
-    kwargs = {"future": True, "pool_pre_ping": True}
+    kwargs: dict[str, Any] = {"future": True, "pool_pre_ping": True}
     if not database_url.startswith("sqlite"):
         kwargs.update(
             {

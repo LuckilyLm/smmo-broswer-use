@@ -21,11 +21,14 @@ class PageSummary:
     is_closed: bool
 
 
-def require_browser_cdp(env: Mapping[str, str] | None = None) -> str:
+def require_browser_cdp(env: Mapping[str, str] | None = None, *, cdp_url: str | None = None) -> str:
+    explicit = (cdp_url or "").strip()
+    if explicit:
+        return explicit
     source = env if env is not None else os.environ
-    value = (source.get("BROWSER_CDP") or "").strip()
+    value = (source.get("FACEBOOK_CDP_URL") or source.get("BROWSER_CDP") or "").strip()
     if not value:
-        raise BrowserCdpNotConfiguredError("BROWSER_CDP is required")
+        raise BrowserCdpNotConfiguredError("FACEBOOK_CDP_URL or BROWSER_CDP is required")
     return value
 
 

@@ -479,7 +479,21 @@ async def _extract_comment_records(page) -> list[CommentRecord]:
     records: list[CommentRecord] = []
     for record in raw_records or []:
         if isinstance(record, dict):
-            records.append(CommentRecord(**{key: record.get(key) for key in CommentRecord.__dataclass_fields__}))
+            records.append(
+                CommentRecord(
+                    comment_id=record.get("comment_id"),
+                    author_name=record.get("author_name"),
+                    author_url=record.get("author_url"),
+                    author_extract_strategy=record.get("author_extract_strategy"),
+                    text=record.get("text"),
+                    timestamp_text=record.get("timestamp_text"),
+                    comment_url=record.get("comment_url"),
+                    direct_comment_url=record.get("direct_comment_url"),
+                    comment_id_source=record.get("comment_id_source"),
+                    is_reply=bool(record.get("is_reply")),
+                    parent_comment_id=record.get("parent_comment_id"),
+                )
+            )
     return records
 
 

@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-import os
 import signal
 import sys
 from pathlib import Path
@@ -18,6 +17,34 @@ from src.facebook_leads.saas.service import SaaSService
 from src.facebook_leads.saas.storage import SaaSStorage
 from src.facebook_leads.saas.worker import ExecutionWorker
 from src.facebook_leads.saas.logging import configure_logging
+from src.facebook_leads.saas.config import ProductionConfig
+from src.facebook_leads.saas.runtime import BrowserRuntimeRegistry
+
+
+def build_worker_service(config: ProductionConfig | None = None) -> SaaSService:
+    config = config or ProductionConfig.from_env()
+    if config.runtime_host == "windows-agent":
+        raise RuntimeError("windows-agent runtime host is not implemented: browser_runtime_host_unavailable")
+    if not config.runtime_available:
+        raise RuntimeError("browser_runtime_host_unavailable")
+    storage = SaaSStorage(config.database_url, create_schema=False)
+    registry = BrowserRuntimeRegistry(
+        storage,
+        profiles_root=config.browser_profile_root,
+        chrome_executable=config.chrome_executable,
+        cdp_port_start=config.browser_cdp_port_start,
+        cdp_port_end=config.browser_cdp_port_end,
+        runtime_host=config.runtime_host,
+        allow_chrome_discovery=not config.is_production,
+    )
+    return SaaSService(
+        storage,
+        runtime_registry=registry,
+        max_queued_executions_per_tenant=config.max_queued_executions_per_tenant,
+        session_ttl_hours=config.session_ttl_hours,
+        session_idle_timeout_hours=config.session_idle_timeout_hours,
+        config=config,
+    )
 
 
 async def main() -> None:
@@ -27,10 +54,11 @@ async def main() -> None:
     parser.add_argument("--worker-id", default=None)
     args = parser.parse_args()
 
-    service = SaaSService(SaaSStorage(os.getenv("DATABASE_URL"), create_schema=False))
+    config = ProductionConfig.from_env()
+    service = build_worker_service(config)
     service.runtime_registry.reconcile_all()
-    concurrency = int(os.getenv("SAAS_WORKER_CONCURRENCY", "1"))
-    logger = configure_logging("worker", os.getenv("LOG_LEVEL", "INFO"))
+    concurrency = config.worker_concurrency
+    logger = configure_logging("worker", config.log_level)
     stop_event = asyncio.Event()
     loop = asyncio.get_running_loop()
     for signal_name in (signal.SIGTERM, signal.SIGINT):
@@ -39,7 +67,16 @@ async def main() -> None:
         except NotImplementedError:
             signal.signal(signal_name, lambda *_args: loop.call_soon_threadsafe(stop_event.set))
     base_id = args.worker_id or "worker"
-    workers = [ExecutionWorker(service, worker_id=base_id if concurrency == 1 else f"{base_id}-{index + 1}") for index in range(concurrency)]
+    workers = [
+        ExecutionWorker(
+            service,
+            worker_id=base_id if concurrency == 1 else f"{base_id}-{index + 1}",
+            heartbeat_interval_seconds=config.worker_heartbeat_interval_seconds,
+            queue_stale_seconds=config.queue_stale_seconds,
+            heartbeat_stale_seconds=config.heartbeat_stale_seconds,
+        )
+        for index in range(concurrency)
+    ]
     logger.info("worker pool started")
     if args.once:
         await workers[0].tick()

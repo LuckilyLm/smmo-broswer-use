@@ -256,8 +256,8 @@ def _comment_from_dict(data: dict[str, Any]):
         comment_url=data.get("comment_url"),
         is_reply=bool(data.get("is_reply")),
         parent_comment_id=data.get("parent_comment_id"),
-        source_content_url=data.get("source_content_url"),
-        fingerprint=data.get("fingerprint"),
+        source_content_url=str(data.get("source_content_url") or ""),
+        fingerprint=str(data.get("fingerprint") or ""),
         direct_comment_url=data.get("direct_comment_url"),
         comment_id_source=data.get("comment_id_source"),
     )
