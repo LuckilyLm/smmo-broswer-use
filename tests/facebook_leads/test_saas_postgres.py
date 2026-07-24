@@ -18,7 +18,10 @@ from src.facebook_leads.saas.worker import ExecutionWorker
 
 
 TEST_DATABASE_URL = os.getenv("TEST_DATABASE_URL")
-pytestmark = pytest.mark.skipif(not TEST_DATABASE_URL, reason="TEST_DATABASE_URL is required for PostgreSQL integration tests")
+pytestmark = pytest.mark.skipif(
+    not TEST_DATABASE_URL or TEST_DATABASE_URL == os.getenv("DATABASE_URL") or "test" not in TEST_DATABASE_URL.rsplit("/", 1)[-1],
+    reason="TEST_DATABASE_URL must point to a dedicated PostgreSQL test database",
+)
 
 
 def make_postgres_service(tmp_path: Path) -> SaaSService:
@@ -156,7 +159,7 @@ def migrated_clean_database():
     env = {**os.environ, "DATABASE_URL": TEST_DATABASE_URL or ""}
     subprocess.run(["py", "-m", "alembic", "upgrade", "head"], check=True, cwd=Path.cwd(), env=env)
     storage = SaaSStorage(TEST_DATABASE_URL, create_schema=False)
-    for table in ["worker_heartbeats", "token_usage", "execution_keywords", "execution_queue_items", "sessions", "executions", "leads", "reply_rules", "campaign_keywords", "campaign_schedules", "campaigns", "browser_runtimes", "platform_accounts", "tenant_users", "users", "tenants"]:
+    for table in ["worker_heartbeats", "token_usage", "reply_records", "reply_candidates", "reply_plans", "reply_match_rules", "reply_templates", "execution_keywords", "execution_queue_items", "sessions", "executions", "leads", "reply_rules", "campaign_keywords", "campaign_schedules", "campaigns", "browser_runtimes", "platform_accounts", "tenant_users", "users", "tenants"]:
         storage.execute(f"DELETE FROM {table}")
     yield
 

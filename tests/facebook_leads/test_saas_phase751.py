@@ -269,7 +269,7 @@ def test_metadata_contains_required_phase751_constraints(tmp_path):
     token_indexes = {item["name"] for item in inspector.get_indexes("token_usage")}
     assert ("execution_id", "keyword") in execution_unique
     assert "uq_token_usage_execution_keyword" in token_indexes
-    assert CURRENT_SCHEMA_REVISION == "007_saas_productization"
+    assert CURRENT_SCHEMA_REVISION == "008_reply_automation"
 
 
 def test_saas_ci_is_secret_safe_and_excludes_real_browser():

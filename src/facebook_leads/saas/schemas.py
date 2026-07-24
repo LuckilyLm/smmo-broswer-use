@@ -52,6 +52,21 @@ class CampaignRequest(StrictRequest):
     max_leads: int | None = Field(default=None, ge=1)
     daily_limit: int | None = Field(default=None, ge=1)
     llm_enabled: bool | None = None
+    lead_detection_mode: str | None = Field(default=None, pattern=r"^(rules_only|rules_with_llm)$")
+    reply_mode: str | None = Field(default=None, pattern=r"^(disabled|manual_approval|automatic)$")
+    default_reply_template_id: str | None = None
+    positive_keywords_json: list[str] | None = None
+    negative_keywords_json: list[str] | None = None
+    excluded_authors_json: list[str] | None = None
+    excluded_comment_patterns_json: list[str] | None = None
+    default_whatsapp: str | None = Field(default=None, max_length=255)
+    default_email: str | None = Field(default=None, max_length=255)
+    default_website: str | None = Field(default=None, max_length=500)
+    default_contact_text: str | None = None
+    reply_daily_limit: int | None = Field(default=None, ge=1)
+    reply_per_minute_limit: int | None = Field(default=None, ge=1)
+    reply_per_hour_limit: int | None = Field(default=None, ge=1)
+    reply_min_interval_seconds: int | None = Field(default=None, ge=1)
 
 
 class CreateCampaignRequest(StrictRequest):
@@ -65,6 +80,21 @@ class CreateCampaignRequest(StrictRequest):
     max_leads: int | None = Field(default=None, ge=1)
     daily_limit: int | None = Field(default=None, ge=1)
     llm_enabled: bool | None = None
+    lead_detection_mode: str | None = Field(default=None, pattern=r"^(rules_only|rules_with_llm)$")
+    reply_mode: str | None = Field(default=None, pattern=r"^(disabled|manual_approval|automatic)$")
+    default_reply_template_id: str | None = None
+    positive_keywords_json: list[str] | None = None
+    negative_keywords_json: list[str] | None = None
+    excluded_authors_json: list[str] | None = None
+    excluded_comment_patterns_json: list[str] | None = None
+    default_whatsapp: str | None = Field(default=None, max_length=255)
+    default_email: str | None = Field(default=None, max_length=255)
+    default_website: str | None = Field(default=None, max_length=500)
+    default_contact_text: str | None = None
+    reply_daily_limit: int | None = Field(default=None, ge=1)
+    reply_per_minute_limit: int | None = Field(default=None, ge=1)
+    reply_per_hour_limit: int | None = Field(default=None, ge=1)
+    reply_min_interval_seconds: int | None = Field(default=None, ge=1)
 
 
 class UpdateCampaignRequest(CampaignRequest):
@@ -125,6 +155,11 @@ class UpdateTenantSettingsRequest(StrictRequest):
     default_target_policy: str | None = Field(default=None, pattern=r"^(owned_only|allowlist|discovery_only)$")
     default_min_confidence: float | None = Field(default=None, ge=0, le=1)
     default_daily_limit: int | None = Field(default=None, ge=1, le=10_000)
+    default_whatsapp: str | None = Field(default=None, max_length=255)
+    default_email: str | None = Field(default=None, max_length=255)
+    default_website: str | None = Field(default=None, max_length=500)
+    default_contact_text: str | None = None
+    tenant_reply_enabled: bool | None = None
 
     @field_validator("timezone")
     @classmethod

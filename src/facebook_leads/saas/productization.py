@@ -542,7 +542,18 @@ class TenantAdminService:
 
     def update_settings(self, context: TenantContext, data: dict[str, Any]) -> dict[str, Any]:
         self._require_writable(context)
-        allowed = {"name", "timezone", "default_target_policy", "default_min_confidence", "default_daily_limit"}
+        allowed = {
+            "name",
+            "timezone",
+            "default_target_policy",
+            "default_min_confidence",
+            "default_daily_limit",
+            "default_whatsapp",
+            "default_email",
+            "default_website",
+            "default_contact_text",
+            "tenant_reply_enabled",
+        }
         updated = self.storage.update_by_id("tenants", context.tenant_id, {key: value for key, value in data.items() if key in allowed})
         self.service.audit.record(action="tenant.settings_update", resource_type="tenant", resource_id=context.tenant_id, tenant_id=context.tenant_id, user_id=context.user_id, metadata=data)
         return updated

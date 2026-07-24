@@ -42,6 +42,10 @@ const CampaignsPage = lazy(() => import("./pages/CampaignsPage").then((module) =
 const KeywordsPage = lazy(() => import("./pages/KeywordsPage").then((module) => ({ default: module.KeywordsPage })));
 const LeadsPage = lazy(() => import("./pages/LeadsPage").then((module) => ({ default: module.LeadsPage })));
 const ReplyRulesPage = lazy(() => import("./pages/ReplyRulesPage").then((module) => ({ default: module.ReplyRulesPage })));
+const ReplyTemplatesPage = lazy(() => import("./pages/ReplyTemplatesPage").then((module) => ({ default: module.ReplyTemplatesPage })));
+const ReplyMatchRulesPage = lazy(() => import("./pages/ReplyMatchRulesPage").then((module) => ({ default: module.ReplyMatchRulesPage })));
+const ReplyTasksPage = lazy(() => import("./pages/ReplyTasksPage").then((module) => ({ default: module.ReplyTasksPage })));
+const ReplyRecordsPage = lazy(() => import("./pages/ReplyRecordsPage").then((module) => ({ default: module.ReplyRecordsPage })));
 const ExecutionsPage = lazy(() => import("./pages/ExecutionsPage").then((module) => ({ default: module.ExecutionsPage })));
 const TokenUsagePage = lazy(() => import("./pages/TokenUsagePage").then((module) => ({ default: module.TokenUsagePage })));
 const UsagePage = lazy(() => import("./pages/UsagePage").then((module) => ({ default: module.UsagePage })));
@@ -59,6 +63,10 @@ const pageComponents: Record<string, React.LazyExoticComponent<React.ComponentTy
   "/keywords": KeywordsPage,
   "/leads": LeadsPage,
   "/reply-rules": ReplyRulesPage,
+  "/reply-templates": ReplyTemplatesPage,
+  "/reply-match-rules": ReplyMatchRulesPage,
+  "/reply-tasks": ReplyTasksPage,
+  "/reply-records": ReplyRecordsPage,
   "/executions": ExecutionsPage,
   "/token-usage": TokenUsagePage,
   "/usage": UsagePage,

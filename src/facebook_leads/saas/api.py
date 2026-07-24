@@ -598,6 +598,94 @@ def create_app(*, database_url: str | None = None, service: SaaSService | None =
         svc.delete_reply_rule(context, rule_id)
         return Response(status_code=204)
 
+    @campaigns_router.get("/api/reply-templates")
+    def list_reply_templates(context: TenantContext = Depends(require_context), svc: SaaSService = Depends(get_service)) -> list[dict[str, Any]]:
+        return svc.list_reply_templates(context)
+
+    @campaigns_router.post("/api/reply-templates")
+    def create_reply_template(payload: dict[str, Any], context: TenantContext = Depends(require_context), svc: SaaSService = Depends(get_service)) -> dict[str, Any]:
+        return svc.create_reply_template(context, payload)
+
+    @campaigns_router.patch("/api/reply-templates/{template_id}")
+    def update_reply_template(template_id: str, payload: dict[str, Any], context: TenantContext = Depends(require_context), svc: SaaSService = Depends(get_service)) -> dict[str, Any]:
+        row = svc.update_reply_template(context, template_id, payload)
+        if not row:
+            raise HTTPException(status_code=404, detail="not found")
+        return row
+
+    @campaigns_router.post("/api/reply-templates/{template_id}/copy")
+    def copy_reply_template(template_id: str, context: TenantContext = Depends(require_context), svc: SaaSService = Depends(get_service)) -> dict[str, Any]:
+        return svc.copy_reply_template(context, template_id)
+
+    @campaigns_router.delete("/api/reply-templates/{template_id}", status_code=204)
+    def archive_reply_template(template_id: str, context: TenantContext = Depends(require_context), svc: SaaSService = Depends(get_service)) -> Response:
+        svc.archive_reply_template(context, template_id)
+        return Response(status_code=204)
+
+    @campaigns_router.post("/api/reply-templates/preview")
+    def preview_reply_template(payload: dict[str, Any], context: TenantContext = Depends(require_context), svc: SaaSService = Depends(get_service)) -> dict[str, Any]:
+        return svc.preview_reply_template(context, payload)
+
+    @campaigns_router.get("/api/reply-match-rules")
+    def list_reply_match_rules(campaign_id: str | None = None, context: TenantContext = Depends(require_context), svc: SaaSService = Depends(get_service)) -> list[dict[str, Any]]:
+        return svc.list_reply_match_rules(context, campaign_id=campaign_id)
+
+    @campaigns_router.post("/api/reply-match-rules")
+    def create_reply_match_rule(payload: dict[str, Any], context: TenantContext = Depends(require_context), svc: SaaSService = Depends(get_service)) -> dict[str, Any]:
+        return svc.create_reply_match_rule(context, payload)
+
+    @campaigns_router.patch("/api/reply-match-rules/{rule_id}")
+    def update_reply_match_rule(rule_id: str, payload: dict[str, Any], context: TenantContext = Depends(require_context), svc: SaaSService = Depends(get_service)) -> dict[str, Any]:
+        row = svc.update_reply_match_rule(context, rule_id, payload)
+        if not row:
+            raise HTTPException(status_code=404, detail="not found")
+        return row
+
+    @campaigns_router.delete("/api/reply-match-rules/{rule_id}", status_code=204)
+    def delete_reply_match_rule(rule_id: str, context: TenantContext = Depends(require_context), svc: SaaSService = Depends(get_service)) -> Response:
+        svc.delete_reply_match_rule(context, rule_id)
+        return Response(status_code=204)
+
+    @campaigns_router.post("/api/reply-match-rules/test")
+    def test_reply_match_rule(payload: dict[str, Any], context: TenantContext = Depends(require_context), svc: SaaSService = Depends(get_service)) -> dict[str, Any]:
+        return svc.test_reply_match_rule(context, payload)
+
+    @campaigns_router.get("/api/reply-candidates")
+    def list_reply_candidates(campaign_id: str | None = None, execution_id: str | None = None, reply_plan_id: str | None = None, status: str | None = None, limit: int = 100, offset: int = 0, context: TenantContext = Depends(require_context), svc: SaaSService = Depends(get_service)) -> dict[str, Any]:
+        return svc.list_reply_candidates(context, {"campaign_id": campaign_id, "execution_id": execution_id, "reply_plan_id": reply_plan_id, "status": status}, limit=limit, offset=offset)
+
+    @campaigns_router.post("/api/reply-candidates/{candidate_id}/approve")
+    def approve_reply_candidate(candidate_id: str, context: TenantContext = Depends(require_context), svc: SaaSService = Depends(get_service)) -> dict[str, Any]:
+        return svc.approve_reply_candidate(context, candidate_id)
+
+    @campaigns_router.post("/api/reply-candidates/{candidate_id}/reject")
+    def reject_reply_candidate(candidate_id: str, payload: dict[str, Any] | None = None, context: TenantContext = Depends(require_context), svc: SaaSService = Depends(get_service)) -> dict[str, Any]:
+        return svc.reject_reply_candidate(context, candidate_id, (payload or {}).get("reason"))
+
+    @campaigns_router.patch("/api/reply-candidates/{candidate_id}/content")
+    def update_reply_candidate_content(candidate_id: str, payload: dict[str, Any], context: TenantContext = Depends(require_context), svc: SaaSService = Depends(get_service)) -> dict[str, Any]:
+        return svc.update_reply_candidate_content(context, candidate_id, str(payload.get("rendered_reply_text") or ""))
+
+    @campaigns_router.get("/api/reply-plans")
+    def list_reply_plans(campaign_id: str | None = None, execution_id: str | None = None, status: str | None = None, limit: int = 100, offset: int = 0, context: TenantContext = Depends(require_context), svc: SaaSService = Depends(get_service)) -> dict[str, Any]:
+        return svc.list_reply_plans(context, {"campaign_id": campaign_id, "execution_id": execution_id, "status": status}, limit=limit, offset=offset)
+
+    @campaigns_router.post("/api/reply-plans/{plan_id}/approve")
+    def approve_reply_plan(plan_id: str, context: TenantContext = Depends(require_context), svc: SaaSService = Depends(get_service)) -> dict[str, Any]:
+        return svc.approve_reply_plan(context, plan_id)
+
+    @campaigns_router.post("/api/reply-plans/{plan_id}/cancel")
+    def cancel_reply_plan(plan_id: str, context: TenantContext = Depends(require_context), svc: SaaSService = Depends(get_service)) -> dict[str, Any]:
+        return svc.cancel_reply_plan(context, plan_id)
+
+    @campaigns_router.post("/api/reply-plans/{plan_id}/execute")
+    def execute_reply_plan(plan_id: str, context: TenantContext = Depends(require_context), svc: SaaSService = Depends(get_service)) -> dict[str, Any]:
+        return svc.execute_reply_plan(context, plan_id)
+
+    @campaigns_router.get("/api/reply-records")
+    def list_reply_records(limit: int = 100, offset: int = 0, context: TenantContext = Depends(require_context), svc: SaaSService = Depends(get_service)) -> dict[str, Any]:
+        return svc.list_reply_records(context, limit=limit, offset=offset)
+
     @executions_router.get("/api/executions")
     def list_executions(request: Request, limit: int = 50, offset: int = 0, context: TenantContext = Depends(require_context), svc: SaaSService = Depends(get_service)) -> Any:
         safe_limit = min(max(limit, 1), 200)
@@ -676,7 +764,7 @@ def create_app(*, database_url: str | None = None, service: SaaSService | None =
     @app.get("/api/settings")
     def settings(context: TenantContext = Depends(require_context), svc: SaaSService = Depends(get_service)) -> dict[str, Any]:
         tenant = svc.storage.get_by_id("tenants", context.tenant_id)
-        return {"tenant": tenant, "send_disabled": True, "approval_mode": "manual"}
+        return {"tenant": tenant, "system_send_enabled": config.system_send_enabled, "reply_safety_message": "" if config.system_send_enabled else "回复发送当前处于关闭状态", "approval_mode": "manual"}
 
     @app.patch("/api/settings")
     def update_settings(

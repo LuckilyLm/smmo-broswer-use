@@ -49,6 +49,7 @@ class ProductionConfig:
     llm_endpoint: str | None
     llm_api_key: str | None
     llm_model: str
+    system_send_enabled: bool
 
     @property
     def is_production(self) -> bool:
@@ -149,6 +150,7 @@ class ProductionConfig:
             llm_endpoint=env.get("OPENAI_ENDPOINT", "").strip() or env.get("OPENAI_BASE_URL", "").strip() or None,
             llm_api_key=env.get("OPENAI_API_KEY", "").strip() or None,
             llm_model=env.get("FACEBOOK_LEADS_LLM_MODEL", "gpt-5.5").strip() or "gpt-5.5",
+            system_send_enabled=_bool(env.get("SAAS_SYSTEM_SEND_ENABLED"), default=False),
         )
 
 

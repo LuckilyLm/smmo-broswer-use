@@ -25,6 +25,9 @@ const statistics = [
   ["tokens_this_month", "dashboard.tokensMonth"],
   ["queued_tasks", "dashboard.queuedTasks"],
   ["running_tasks", "dashboard.runningTasks"],
+  ["pending_replies", "dashboard.pendingReplies"],
+  ["today_replied", "dashboard.todayReplied"],
+  ["today_failed_replies", "dashboard.todayFailedReplies"],
   ["auto_tasks_today", "dashboard.autoTasksToday"],
   ["failed_tasks", "dashboard.failedTasks"]
 ] as const;
@@ -41,6 +44,7 @@ export function DashboardPage() {
       <Button aria-label={t("common.refresh")} icon={<ReloadOutlined />} loading={summary.loading} onClick={summary.refresh}>{t("common.refresh")}</Button>
     }>
       <ResourceState loading={false} error={summary.error} empty={false} onRetry={summary.refresh}>
+        {!summary.data.system_send_enabled && <ProCard className="plan-strip"><Tag color="orange">{summary.data.reply_safety_message || t("reply.sendOff")}</Tag></ProCard>}
         <ProCard className="plan-strip" title={t("dashboard.currentPlan")} extra={<Tag color="green">{usage.data.plan.name || "-"}</Tag>}>
           <div className="plan-meters">
             {(["monthly_executions", "monthly_tokens", "monthly_leads"] as const).map((key) => {
