@@ -66,6 +66,10 @@ def test_browser_cdp_is_read_from_environment_mapping():
     assert require_browser_cdp({"BROWSER_CDP": "http://host:9222"}) == "http://host:9222"
 
 
+def test_explicit_browser_cdp_precedes_environment_mapping():
+    assert require_browser_cdp({"FACEBOOK_CDP_URL": "http://global:9222"}, cdp_url="http://runtime:9400") == "http://runtime:9400"
+
+
 def test_page_accessor_is_wrapped_behind_adapter():
     page = FakePage("https://example.test")
     context = FakeBrowserContext([page], page)

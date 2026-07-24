@@ -7,6 +7,7 @@ from types import SimpleNamespace
 from pathlib import Path
 
 import pytest
+from sqlalchemy.exc import IntegrityError
 from fastapi.testclient import TestClient
 
 import src.facebook_leads.saas.runtime as runtime_module
@@ -25,6 +26,35 @@ def test_windows_pid_check_does_not_decode_localized_tasklist_output(monkeypatch
     monkeypatch.setattr(runtime_module.subprocess, "run", lambda *_args, **_kwargs: SimpleNamespace(stdout=b'"chrome.exe","4508"'))
 
     assert runtime_module._pid_exists(4508) is True
+
+
+def test_runtime_retries_cdp_port_unique_collision(tmp_path, monkeypatch):
+    storage = SaaSStorage(tmp_path / "collision.sqlite")
+    registry = BrowserRuntimeRegistry(storage, profiles_root=tmp_path / "profiles", cdp_port_start=9400, cdp_port_end=9401)
+    service = SaaSService(storage, runtime_registry=registry)
+    tenant = service.create_tenant("Collision", "collision")
+    user = service.create_user("collision@example.com", "pass123456", "Admin")
+    service.add_user_to_tenant(tenant["id"], user["id"], role="admin")
+    context = service.context_from_token(service.login("collision@example.com", "pass123456")["access_token"])
+    account = service.create_platform_account(context, {"platform": "facebook", "display_name": "Page"})
+    ports = iter([9400, 9401])
+    monkeypatch.setattr(registry, "allocate_port", lambda: next(ports))
+    original_insert = storage.insert
+    calls = 0
+
+    def insert_with_collision(table, data):
+        nonlocal calls
+        if table == "browser_runtimes" and calls == 0:
+            calls += 1
+            raise IntegrityError("insert", {}, Exception("unique cdp_port"))
+        return original_insert(table, data)
+
+    monkeypatch.setattr(storage, "insert", insert_with_collision)
+
+    runtime = registry.create_runtime(context, account["id"])
+
+    assert runtime["cdp_port"] == 9401
+    assert calls == 1
 
 
 def service_with_registry(tmp_path: Path, *, login_status: str = "logged_in", runner=None):
@@ -50,13 +80,13 @@ def workspace(service: SaaSService, slug: str = "tenant"):
     return context, account, campaign, session
 
 
-def fake_runner(tmp_path: Path, *, delay: float = 0.0, seen_env: list[str] | None = None):
-    async def run(_config):
+def fake_runner(tmp_path: Path, *, delay: float = 0.0, seen_configs: list | None = None):
+    async def run(config):
         if delay:
             await asyncio.sleep(delay)
-        if seen_env is not None:
-            seen_env.append(os.environ.get("BROWSER_CDP", ""))
-        run_dir = tmp_path / "runner" / f"run_{len(seen_env or [])}"
+        if seen_configs is not None:
+            seen_configs.append(config)
+        run_dir = tmp_path / "runner" / f"run_{len(seen_configs or [])}"
         run_dir.mkdir(parents=True, exist_ok=True)
         report_path = run_dir / "lead_report_enriched.json"
         report_path.write_text(
@@ -186,6 +216,19 @@ def test_cdp_unreachable_and_crash_mark_unhealthy(tmp_path, monkeypatch):
     assert health["status"] == "unhealthy"
     assert service.storage.get_by_id("browser_runtimes", runtime["id"], tenant_id=ctx.tenant_id)["status"] == "unhealthy"
 
+    service.storage.update_by_id(
+        "browser_runtimes",
+        runtime["id"],
+        {"status": "running", "browser_pid": 99999},
+        tenant_id=ctx.tenant_id,
+    )
+    monkeypatch.setattr(runtime_module, "_pid_exists", lambda _pid: False)
+
+    crashed = service.runtime_registry.reconcile_runtime(ctx, runtime["id"])
+
+    assert crashed["status"] == "stopped"
+    assert crashed["browser_pid"] is None
+
 
 def test_runtime_api_tenant_isolation_and_safe_fields(tmp_path, monkeypatch):
     service = service_with_registry(tmp_path)
@@ -221,9 +264,9 @@ def test_reset_profile_requires_confirmation(tmp_path, monkeypatch):
     assert "profile_path" not in reset["runtime"]
 
 
-def test_campaign_run_uses_scoped_runtime_cdp_and_not_global_cdp(tmp_path, monkeypatch):
-    seen_env: list[str] = []
-    service = service_with_registry(tmp_path, runner=fake_runner(tmp_path, seen_env=seen_env))
+def test_campaign_run_uses_explicit_runtime_cdp_and_not_global_cdp(tmp_path, monkeypatch):
+    seen_configs: list = []
+    service = service_with_registry(tmp_path, runner=fake_runner(tmp_path, seen_configs=seen_configs))
     ctx, account, campaign, _session = workspace(service)
     runtime = make_runtime_running(service, ctx, account, monkeypatch)
     monkeypatch.setenv("BROWSER_CDP", "http://127.0.0.1:9222")
@@ -232,7 +275,41 @@ def test_campaign_run_uses_scoped_runtime_cdp_and_not_global_cdp(tmp_path, monke
     asyncio.run(ExecutionWorker(service, worker_id="runtime-worker").tick())
 
     assert result["send_disabled"] is True
-    assert seen_env == [runtime["cdp_url"]]
+    assert [config.cdp_url for config in seen_configs] == [runtime["cdp_url"]]
+    assert os.environ["BROWSER_CDP"] == "http://127.0.0.1:9222"
+
+
+def test_concurrent_runtimes_keep_explicit_cdp_isolated(tmp_path, monkeypatch):
+    seen: dict[str, str | None] = {}
+
+    async def runner(config):
+        await asyncio.sleep(0.02)
+        seen[str(config.keyword)] = config.cdp_url
+        return await fake_runner(tmp_path)(config)
+
+    service = service_with_registry(tmp_path, runner=runner)
+    ctx, account_a, campaign_a, _session = workspace(service, "concurrent-cdp")
+    account_b = service.create_platform_account(ctx, {"platform": "facebook", "display_name": "Page B"})
+    campaign_b = service.create_campaign(ctx, {"name": "Other", "platform_account_id": account_b["id"], "status": "active", "target_policy": "discovery_only"})
+    service.create_keyword(ctx, campaign_b["id"], {"keyword": "massage chair price"})
+    runtime_a = make_runtime_running(service, ctx, account_a, monkeypatch)
+    runtime_b = make_runtime_running(service, ctx, account_b, monkeypatch)
+    monkeypatch.setenv("BROWSER_CDP", "http://global:9222")
+
+    async def queue_both():
+        return await asyncio.gather(service.run_campaign(ctx, campaign_a["id"]), service.run_campaign(ctx, campaign_b["id"]))
+
+    queued_a, queued_b = asyncio.run(queue_both())
+    items = [service.storage.claim_queue_item(worker_id="a"), service.storage.claim_queue_item(worker_id="b")]
+
+    async def run_both():
+        return await asyncio.gather(*(service.run_queue_item(item) for item in items if item))
+
+    asyncio.run(run_both())
+
+    assert queued_a["send_disabled"] is True and queued_b["send_disabled"] is True
+    assert seen == {"massage chair": runtime_a["cdp_url"], "massage chair price": runtime_b["cdp_url"]}
+    assert os.environ["BROWSER_CDP"] == "http://global:9222"
 
 
 def test_same_account_concurrent_run_blocked_and_different_account_allowed(tmp_path, monkeypatch):

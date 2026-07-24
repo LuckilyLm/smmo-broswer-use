@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -11,6 +11,7 @@ from fastapi.testclient import TestClient
 
 from src.facebook_leads.facebook.orchestrator import FacebookLeadsRunConfig
 from src.facebook_leads.saas.api import create_app
+from src.facebook_leads.saas.db import utc_now
 from src.facebook_leads.saas.models import TenantContext
 from src.facebook_leads.saas.providers import FacebookProvider, InstagramProvider, OzonProvider, ProviderRunRequest, TikTokProvider, XProvider
 from src.facebook_leads.saas.runtime import safe_runtime
@@ -280,8 +281,12 @@ def test_lead_pagination_filter_and_token_details_are_tenant_scoped(tmp_path):
     page = service.list_leads(ctx_a, {"keyword": "massage"}, limit=1, offset=0)
     assert len(page["items"]) == 1
     assert page["items"][0]["tenant_id"] == ctx_a.tenant_id
-    assert service.token_usage_details(ctx_a)["by_model"][0]["total_tokens"] == 15
-    assert service.token_usage_details(ctx_b)["by_model"][0]["total_tokens"] == 15
+    details_a = service.token_usage_details(ctx_a)
+    details_b = service.token_usage_details(ctx_b)
+    assert details_a["by_model"][0]["total_tokens"] == 15
+    assert details_a["by_campaign"][0]["campaign_name"] == campaign_a["name"]
+    assert details_b["by_model"][0]["total_tokens"] == 15
+    assert details_b["by_campaign"][0]["campaign_name"] == campaign_b["name"]
 
 
 def test_saas_api_login_dashboard_and_campaign_run(tmp_path):
@@ -316,6 +321,7 @@ def test_frontend_routes_and_no_internal_terms_exposed():
 
     for route in [
         "/login",
+        "/change-password",
         "/dashboard",
         "/platform-accounts",
         "/campaigns",
@@ -392,6 +398,85 @@ def test_scheduler_due_campaign_enqueues_once_and_skips_paused_or_disabled(tmp_p
     service.update_campaign(ctx, campaign["id"], {"status": "active"})
     service.disable_campaign_schedule(ctx, campaign["id"])
     assert scheduler.tick() == []
+
+
+def test_scheduler_queue_full_uses_short_retry_without_marking_last_run(tmp_path):
+    service = make_service(tmp_path, runner=fake_runner_factory(tmp_path))
+    service.max_queued_executions_per_tenant = 1
+    ctx, _account, campaign = create_workspace(service)
+    service.enqueue_campaign_execution(ctx, campaign["id"], trigger_type="manual")
+    schedule = service.put_campaign_schedule(
+        ctx,
+        campaign["id"],
+        {"enabled": True, "schedule_type": "daily", "daily_time": "23:59", "timezone": "UTC"},
+    )
+    due = datetime.now(timezone.utc) - timedelta(minutes=1)
+    service.storage.update_by_id("campaign_schedules", schedule["id"], {"next_run_at": due, "last_run_at": None}, tenant_id=ctx.tenant_id)
+    before = datetime.now(timezone.utc)
+
+    assert CampaignScheduler(service, queue_full_retry_minutes=5).tick() == []
+
+    updated = service.storage.get_by_id("campaign_schedules", schedule["id"], tenant_id=ctx.tenant_id)
+    retry_at = datetime.fromisoformat(updated["next_run_at"])
+    if retry_at.tzinfo is None:
+        retry_at = retry_at.replace(tzinfo=timezone.utc)
+    assert updated["last_run_at"] is None
+    assert timedelta(minutes=4, seconds=50) <= retry_at - before <= timedelta(minutes=5, seconds=10)
+    assert service.storage.count("executions", tenant_id=ctx.tenant_id) == 1
+
+
+def test_scheduler_duplicate_advances_schedule_without_duplicate_execution(tmp_path):
+    service = make_service(tmp_path, runner=fake_runner_factory(tmp_path))
+    ctx, _account, campaign = create_workspace(service)
+    schedule = service.put_campaign_schedule(
+        ctx,
+        campaign["id"],
+        {"enabled": True, "schedule_type": "interval", "interval_minutes": 60, "timezone": "UTC"},
+    )
+    due = datetime.now(timezone.utc) - timedelta(minutes=1)
+    service.storage.update_by_id("campaign_schedules", schedule["id"], {"next_run_at": due}, tenant_id=ctx.tenant_id)
+    scheduler = CampaignScheduler(service)
+    assert len(scheduler.tick()) == 1
+    execution_count = service.storage.count("executions", tenant_id=ctx.tenant_id)
+    service.storage.update_by_id("campaign_schedules", schedule["id"], {"next_run_at": due, "last_run_at": None}, tenant_id=ctx.tenant_id)
+
+    assert scheduler.tick() == []
+
+    updated = service.storage.get_by_id("campaign_schedules", schedule["id"], tenant_id=ctx.tenant_id)
+    assert updated["last_run_at"] is not None
+    assert service.storage.count("executions", tenant_id=ctx.tenant_id) == execution_count
+
+
+def test_worker_heartbeat_keeps_long_running_item_out_of_stale_recovery(tmp_path):
+    async def delayed_runner(config):
+        await asyncio.sleep(0.12)
+        return await fake_runner_factory(tmp_path)(config)
+
+    service = make_service(tmp_path, runner=delayed_runner)
+    ctx, _account, campaign = create_workspace(service)
+    queued = asyncio.run(service.run_campaign(ctx, campaign["id"]))
+
+    async def exercise():
+        worker = ExecutionWorker(service, worker_id="heartbeat-worker", heartbeat_interval_seconds=0.01)
+        task = asyncio.create_task(worker.tick())
+        await asyncio.sleep(0.06)
+        item = service.storage.find_one("execution_queue_items", {"execution_id": queued["execution_id"]})
+        service.storage.update_by_id("execution_queue_items", item["id"], {"started_at": utc_now() - timedelta(hours=8)})
+        heartbeat = service.storage.find_one("worker_heartbeats", {"worker_id": "heartbeat-worker"})
+        heartbeat_seen = datetime.fromisoformat(heartbeat["last_seen_at"])
+        if heartbeat_seen.tzinfo is None:
+            heartbeat_seen = heartbeat_seen.replace(tzinfo=timezone.utc)
+        recovered = service.storage.fail_stale_queue_items(
+            stale_before=utc_now() - timedelta(hours=6),
+            heartbeat_stale_before=heartbeat_seen - timedelta(seconds=1),
+        )
+        result = await task
+        return recovered, result
+
+    recovered, result = asyncio.run(exercise())
+
+    assert recovered == 0
+    assert result["status"] == "completed"
 
 
 def test_multi_keyword_run_aggregates_tokens_and_dedups_leads(tmp_path):

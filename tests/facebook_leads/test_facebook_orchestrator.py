@@ -391,6 +391,30 @@ def test_resume_without_keyword_does_not_default_to_car_detailing():
     assert conf.keyword is None
 
 
+def test_cli_cdp_explicit_value_precedes_environment_fallback():
+    args = argparse.Namespace(
+        cdp_url="http://127.0.0.1:9400",
+        keyword=None,
+        max_contents=None,
+        max_comments=None,
+        llm_review=None,
+        no_llm_review=False,
+        max_leads=None,
+        min_confidence=None,
+        daily_limit=None,
+        interval_seconds=None,
+        dry_run=True,
+        resume=None,
+    )
+
+    explicit = build_config_from_env(args, {"FACEBOOK_CDP_URL": "http://127.0.0.1:9222"})
+    args.cdp_url = None
+    fallback = build_config_from_env(args, {"FACEBOOK_CDP_URL": "http://127.0.0.1:9223"})
+
+    assert explicit.cdp_url == "http://127.0.0.1:9400"
+    assert fallback.cdp_url == "http://127.0.0.1:9223"
+
+
 def test_artifacts_do_not_contain_secret(tmp_path):
     result = run_job(config(tmp_path), deps())
     combined = Path(result["paths"]["job_report_json"]).read_text(encoding="utf-8") + Path(result["paths"]["job_report_html"]).read_text(encoding="utf-8")
