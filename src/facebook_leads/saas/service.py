@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import secrets
+import re
 from datetime import datetime, time, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -351,8 +352,34 @@ class SaaSService:
         return campaigns
 
     def create_campaign(self, context: TenantContext, data: dict[str, Any]) -> dict[str, Any]:
+        return self.create_campaign_with_keywords(context, data, [])
+
+    def create_campaign_with_keywords(self, context: TenantContext, data: dict[str, Any], keywords: list[str] | None = None) -> dict[str, Any]:
         self._require_tenant_writable(context)
         self.quota.check_quota(context.tenant_id, "campaigns")
+        normalized_keywords = _normalize_keywords(keywords) if keywords else []
+        if len(normalized_keywords) > 1:
+            self.quota.require_feature(context.tenant_id, "allow_multi_keyword")
+        payload = self._campaign_payload(context, data)
+        require_permission(context, Permission.CAMPAIGN_WRITE)
+        with self.storage.transaction() as session:
+            campaign = self.storage.insert("campaigns", payload, session=session)
+            for keyword in normalized_keywords:
+                self.storage.insert(
+                    "campaign_keywords",
+                    {
+                        "tenant_id": context.tenant_id,
+                        "campaign_id": campaign["id"],
+                        "keyword": keyword,
+                        "enabled": True,
+                        "priority": 100,
+                    },
+                    session=session,
+                )
+        self.audit.record(action="campaign.create", resource_type="campaign", resource_id=campaign["id"], tenant_id=context.tenant_id, user_id=context.user_id, metadata=_pick(data, CAMPAIGN_WRITE_FIELDS))
+        return campaign
+
+    def _campaign_payload(self, context: TenantContext, data: dict[str, Any]) -> dict[str, Any]:
         payload = _pick(data, CAMPAIGN_WRITE_FIELDS)
         if payload.get("target_policy", "discovery_only") not in TARGET_POLICIES:
             raise ValueError("invalid target_policy")
@@ -365,7 +392,8 @@ class SaaSService:
         account = self.storage.get_by_id("platform_accounts", payload["platform_account_id"], tenant_id=context.tenant_id)
         if not account:
             raise PermissionError("platform account not found")
-        require_permission(context, Permission.CAMPAIGN_WRITE)
+        if payload.get("default_reply_template_id"):
+            self._require_reply_template(context, payload["default_reply_template_id"])
         defaults = {
             "status": "draft",
             "target_policy": "discovery_only",
@@ -386,9 +414,7 @@ class SaaSService:
             "reply_per_hour_limit": 10,
             "reply_min_interval_seconds": 60,
         }
-        campaign = self.storage.insert("campaigns", {**defaults, **payload, "tenant_id": context.tenant_id})
-        self.audit.record(action="campaign.create", resource_type="campaign", resource_id=campaign["id"], tenant_id=context.tenant_id, user_id=context.user_id, metadata=payload)
-        return campaign
+        return {**defaults, **payload, "tenant_id": context.tenant_id}
 
     def update_campaign(self, context: TenantContext, campaign_id: str, data: dict[str, Any]) -> dict[str, Any] | None:
         self._require_tenant_writable(context)
@@ -406,6 +432,8 @@ class SaaSService:
             raise PermissionError("permission denied")
         if payload.get("platform_account_id") and not self.storage.get_by_id("platform_accounts", payload["platform_account_id"], tenant_id=context.tenant_id):
             raise PermissionError("platform account not found")
+        if payload.get("default_reply_template_id"):
+            self._require_reply_template(context, payload["default_reply_template_id"])
         return self.storage.update_by_id("campaigns", campaign_id, payload, tenant_id=context.tenant_id)
 
     def delete_campaign(self, context: TenantContext, campaign_id: str) -> None:
@@ -433,16 +461,45 @@ class SaaSService:
         self._require_tenant_writable(context)
         self._require_campaign(context, campaign_id)
         require_permission(context, Permission.KEYWORD_WRITE)
-        if data.get("enabled", True) and self.storage.count("campaign_keywords", tenant_id=context.tenant_id, filters={"campaign_id": campaign_id, "enabled": True}) >= 1:
-            self.quota.require_feature(context.tenant_id, "allow_multi_keyword")
-        return self.storage.insert("campaign_keywords", {"enabled": True, "priority": 100, **_pick(data, KEYWORD_WRITE_FIELDS), "tenant_id": context.tenant_id, "campaign_id": campaign_id})
+        keywords = _normalize_keywords([str(data.get("keyword") or "")])
+        self._require_keyword_quota(context, campaign_id, keywords, enabled=bool(data.get("enabled", True)))
+        return self.storage.insert("campaign_keywords", {"enabled": True, "priority": 100, **_pick(data, KEYWORD_WRITE_FIELDS), "keyword": keywords[0], "tenant_id": context.tenant_id, "campaign_id": campaign_id})
+
+    def create_keywords(self, context: TenantContext, campaign_id: str, data: dict[str, Any]) -> dict[str, Any]:
+        self._require_tenant_writable(context)
+        self._require_campaign(context, campaign_id)
+        require_permission(context, Permission.KEYWORD_WRITE)
+        keywords = _normalize_keywords([str(item) for item in data.get("keywords", [])])
+        enabled = bool(data.get("enabled", True))
+        priority = int(data.get("priority") or 100)
+        self._require_keyword_quota(context, campaign_id, keywords, enabled=enabled)
+        rows: list[dict[str, Any]] = []
+        with self.storage.transaction() as session:
+            for keyword in keywords:
+                rows.append(
+                    self.storage.insert(
+                        "campaign_keywords",
+                        {
+                            "tenant_id": context.tenant_id,
+                            "campaign_id": campaign_id,
+                            "keyword": keyword,
+                            "enabled": enabled,
+                            "priority": priority,
+                        },
+                        session=session,
+                    )
+                )
+        return {"items": rows, "created": len(rows)}
 
     def update_keyword(self, context: TenantContext, keyword_id: str, data: dict[str, Any]) -> dict[str, Any] | None:
         self._require_tenant_writable(context)
         if not self.storage.get_by_id("campaign_keywords", keyword_id, tenant_id=context.tenant_id):
             return None
         require_permission(context, Permission.KEYWORD_WRITE)
-        return self.storage.update_by_id("campaign_keywords", keyword_id, _pick(data, KEYWORD_WRITE_FIELDS), tenant_id=context.tenant_id)
+        payload = _pick(data, KEYWORD_WRITE_FIELDS)
+        if "keyword" in payload:
+            payload["keyword"] = _normalize_keywords([str(payload["keyword"])])[0]
+        return self.storage.update_by_id("campaign_keywords", keyword_id, payload, tenant_id=context.tenant_id)
 
     def delete_keyword(self, context: TenantContext, keyword_id: str) -> None:
         self._require_tenant_writable(context)
@@ -491,9 +548,14 @@ class SaaSService:
 
     def archive_reply_template(self, context: TenantContext, template_id: str) -> None:
         self._require_tenant_writable(context)
-        if not self.storage.get_by_id("reply_templates", template_id, tenant_id=context.tenant_id):
-            raise PermissionError("reply template not found")
+        template = self._require_reply_template(context, template_id)
         require_permission(context, Permission.REPLY_RULE_WRITE)
+        if template.get("is_default"):
+            raise ServiceConflictError("default_reply_template_in_use")
+        if self.storage.find_one("campaigns", {"tenant_id": context.tenant_id, "default_reply_template_id": template_id, "deleted_at": None}):
+            raise ServiceConflictError("reply_template_in_use_by_campaign")
+        if self.storage.find_one("reply_match_rules", {"tenant_id": context.tenant_id, "reply_template_id": template_id, "archived_at": None}):
+            raise ServiceConflictError("reply_template_in_use_by_rule")
         self.storage.update_by_id("reply_templates", template_id, {"enabled": False, "archived_at": utc_now()}, tenant_id=context.tenant_id)
 
     def copy_reply_template(self, context: TenantContext, template_id: str) -> dict[str, Any]:
@@ -524,10 +586,11 @@ class SaaSService:
         self._require_tenant_writable(context)
         require_permission(context, Permission.REPLY_RULE_WRITE)
         payload = {"enabled": True, "priority": 100, "contains_any_json": [], "contains_all_json": [], "author_exclude_json": [], **_pick(data, REPLY_MATCH_RULE_WRITE_FIELDS)}
+        _validate_reply_match_rule_payload(payload)
         if payload.get("campaign_id"):
             self._require_campaign(context, payload["campaign_id"])
-        if payload.get("reply_template_id") and not self.storage.get_by_id("reply_templates", payload["reply_template_id"], tenant_id=context.tenant_id):
-            raise PermissionError("reply template not found")
+        if payload.get("reply_template_id"):
+            self._require_reply_template(context, payload["reply_template_id"])
         match_comment({"text": "test", "author_name": "preview", "fingerprint": "preview"}, {}, [payload])
         return self.storage.insert("reply_match_rules", {**payload, "tenant_id": context.tenant_id, "created_by": context.user_id})
 
@@ -539,8 +602,24 @@ class SaaSService:
         require_permission(context, Permission.REPLY_RULE_WRITE)
         payload = _pick(data, REPLY_MATCH_RULE_WRITE_FIELDS)
         merged = {**current, **payload}
+        _validate_reply_match_rule_payload(merged)
+        if merged.get("campaign_id"):
+            self._require_campaign(context, merged["campaign_id"])
+        if merged.get("reply_template_id"):
+            self._require_reply_template(context, merged["reply_template_id"])
         match_comment({"text": "test", "author_name": "preview", "fingerprint": "preview"}, {}, [merged])
         return self.storage.update_by_id("reply_match_rules", rule_id, payload, tenant_id=context.tenant_id)
+
+    def copy_reply_match_rule(self, context: TenantContext, rule_id: str) -> dict[str, Any]:
+        self._require_tenant_writable(context)
+        source = self.storage.get_by_id("reply_match_rules", rule_id, tenant_id=context.tenant_id)
+        if not source or source.get("archived_at"):
+            raise PermissionError("reply match rule not found")
+        require_permission(context, Permission.REPLY_RULE_WRITE)
+        payload = _pick(source, REPLY_MATCH_RULE_WRITE_FIELDS)
+        payload["name"] = f"{source['name']} Copy"
+        payload["enabled"] = False
+        return self.create_reply_match_rule(context, payload)
 
     def delete_reply_match_rule(self, context: TenantContext, rule_id: str) -> None:
         self._require_tenant_writable(context)
@@ -552,8 +631,11 @@ class SaaSService:
     def test_reply_match_rule(self, context: TenantContext, data: dict[str, Any]) -> dict[str, Any]:
         campaign = self.storage.get_by_id("campaigns", data.get("campaign_id"), tenant_id=context.tenant_id) if data.get("campaign_id") else {}
         rule = {"id": "preview", "name": data.get("name") or "Preview", "enabled": True, **_pick(data, REPLY_MATCH_RULE_WRITE_FIELDS)}
+        _validate_reply_match_rule_payload(rule)
         result = match_comment({"text": data.get("comment_text") or "", "author_name": data.get("author_name") or "", "fingerprint": "preview"}, campaign or {}, [rule])
-        return result.__dict__
+        template = self._select_reply_template(context, result.template_id, campaign or {}) if result.matched else None
+        status = "matched" if result.matched else "blocked" if result.blocked_reason else "not_matched"
+        return {**result.__dict__, "status": status, "selected_template_id": (template or {}).get("id"), "selected_template_name": (template or {}).get("name")}
 
     def list_reply_candidates(self, context: TenantContext, filters: dict[str, Any] | None = None, *, limit: int = 100, offset: int = 0) -> dict[str, Any]:
         allowed = {"campaign_id", "execution_id", "reply_plan_id", "status"}
@@ -576,15 +658,39 @@ class SaaSService:
     def reject_reply_candidate(self, context: TenantContext, candidate_id: str, reason: str | None = None) -> dict[str, Any]:
         candidate = self._require_reply_candidate(context, candidate_id)
         self._require_reply_approval_role(context)
-        row = self.storage.update_by_id("reply_candidates", candidate_id, {"status": "rejected", "blocked_reason": reason or "rejected", "rejected_by": context.user_id, "rejected_at": utc_now()}, tenant_id=context.tenant_id) or candidate
+        reason_text = str(reason or "").strip()
+        if not reason_text:
+            raise ValueError("reject_reason_required")
+        if candidate["status"] not in {"pending_approval", "blocked", "approved"}:
+            raise ServiceConflictError("candidate_not_rejectable")
+        row = self.storage.update_by_id("reply_candidates", candidate_id, {"status": "rejected", "blocked_reason": reason_text, "rejected_by": context.user_id, "rejected_at": utc_now()}, tenant_id=context.tenant_id) or candidate
         self.audit.record(action="reply_candidate.reject", resource_type="reply_candidate", resource_id=candidate_id, tenant_id=context.tenant_id, user_id=context.user_id)
         return row
+
+    def cancel_reply_candidate(self, context: TenantContext, candidate_id: str) -> dict[str, Any]:
+        candidate = self._require_reply_candidate(context, candidate_id)
+        self._require_reply_approval_role(context)
+        if candidate["status"] not in {"pending_approval", "blocked", "approved"}:
+            raise ServiceConflictError("candidate_not_cancellable")
+        row = self.storage.update_by_id("reply_candidates", candidate_id, {"status": "cancelled", "blocked_reason": "cancelled"}, tenant_id=context.tenant_id) or candidate
+        self.audit.record(action="reply_candidate.cancel", resource_type="reply_candidate", resource_id=candidate_id, tenant_id=context.tenant_id, user_id=context.user_id)
+        return row
+
+    def bulk_approve_reply_candidates(self, context: TenantContext, candidate_ids: list[str]) -> dict[str, Any]:
+        items = [self.approve_reply_candidate(context, candidate_id) for candidate_id in candidate_ids]
+        return {"items": items, "updated": len(items)}
+
+    def bulk_reject_reply_candidates(self, context: TenantContext, candidate_ids: list[str], reason: str) -> dict[str, Any]:
+        items = [self.reject_reply_candidate(context, candidate_id, reason) for candidate_id in candidate_ids]
+        return {"items": items, "updated": len(items)}
 
     def update_reply_candidate_content(self, context: TenantContext, candidate_id: str, content: str) -> dict[str, Any]:
         candidate = self._require_reply_candidate(context, candidate_id)
         self._require_reply_approval_role(context)
         if not content.strip() or len(content) > 2000:
             raise ValueError("rendered_reply_invalid")
+        if candidate["status"] in {"sent", "rejected", "cancelled"}:
+            raise ServiceConflictError("candidate_content_locked")
         return self.storage.update_by_id("reply_candidates", candidate_id, {"rendered_reply_text": content, "status": "pending_approval"}, tenant_id=context.tenant_id) or candidate
 
     def list_reply_plans(self, context: TenantContext, filters: dict[str, Any] | None = None, *, limit: int = 100, offset: int = 0) -> dict[str, Any]:
@@ -610,6 +716,8 @@ class SaaSService:
     def cancel_reply_plan(self, context: TenantContext, plan_id: str) -> dict[str, Any]:
         plan = self._require_reply_plan(context, plan_id)
         self._require_reply_approval_role(context, automatic_allowed=True)
+        if plan["status"] not in {"pending_approval", "approved", "blocked"}:
+            raise ServiceConflictError("plan_not_cancellable")
         return self.storage.update_by_id("reply_plans", plan_id, {"status": "cancelled"}, tenant_id=context.tenant_id) or plan
 
     def execute_reply_plan(self, context: TenantContext, plan_id: str) -> dict[str, Any]:
@@ -1176,6 +1284,12 @@ class SaaSService:
             raise PermissionError("platform account not found")
         return account
 
+    def _require_reply_template(self, context: TenantContext, template_id: str) -> dict[str, Any]:
+        template = self.storage.get_by_id("reply_templates", template_id, tenant_id=context.tenant_id)
+        if not template or template.get("archived_at"):
+            raise PermissionError("reply template not found")
+        return template
+
     def _require_reply_approval_role(self, context: TenantContext, *, automatic_allowed: bool = False) -> None:
         if context.role in {"owner", "admin"}:
             return
@@ -1314,6 +1428,13 @@ class SaaSService:
         if tenant.get("status") == "suspended":
             raise PermissionError("tenant_suspended")
 
+    def _require_keyword_quota(self, context: TenantContext, campaign_id: str, keywords: list[str], *, enabled: bool) -> None:
+        if not enabled:
+            return
+        active_count = self.storage.count("campaign_keywords", tenant_id=context.tenant_id, filters={"campaign_id": campaign_id, "enabled": True})
+        if active_count + len(keywords) > 1:
+            self.quota.require_feature(context.tenant_id, "allow_multi_keyword")
+
     def _count(
         self,
         context: TenantContext,
@@ -1361,6 +1482,27 @@ def _without_secret_fields(data: dict[str, Any]) -> dict[str, Any]:
 
 def _pick(data: dict[str, Any], allowed: set[str]) -> dict[str, Any]:
     return {key: value for key, value in data.items() if key in allowed}
+
+
+def _normalize_keywords(keywords: list[str]) -> list[str]:
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for value in keywords:
+        keyword = str(value or "").strip()
+        if not keyword:
+            continue
+        if len(keyword) > 255:
+            raise ValueError("keyword_too_long")
+        key = keyword.casefold()
+        if key in seen:
+            continue
+        seen.add(key)
+        normalized.append(keyword)
+    if not normalized:
+        raise ValueError("keyword_required")
+    if len(normalized) > 50:
+        raise ValueError("too_many_keywords")
+    return normalized
 
 
 def _is_retryable_error(error_type: Any, message: Any) -> bool:
@@ -1447,3 +1589,18 @@ def _preview_template_values() -> dict[str, str]:
         "keyword": "preview",
         "author_name": "Preview User",
     }
+
+
+def _validate_reply_match_rule_payload(payload: dict[str, Any]) -> None:
+    pattern = str(payload.get("regex_pattern") or "").strip()
+    if pattern:
+        if len(pattern) > 500:
+            raise ValueError("regex_too_long")
+        try:
+            re.compile(pattern)
+        except re.error as exc:
+            raise ValueError("invalid_regex") from exc
+    minimum = payload.get("minimum_length")
+    maximum = payload.get("maximum_length")
+    if minimum is not None and maximum is not None and int(minimum) > int(maximum):
+        raise ValueError("invalid_length_range")

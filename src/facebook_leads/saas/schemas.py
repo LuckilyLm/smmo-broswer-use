@@ -7,6 +7,8 @@ from zoneinfo import ZoneInfo
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+from .reply_automation import ALLOWED_TEMPLATE_VARIABLES, PLACEHOLDER_RE
+
 
 class StrictRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -95,6 +97,7 @@ class CreateCampaignRequest(StrictRequest):
     reply_per_minute_limit: int | None = Field(default=None, ge=1)
     reply_per_hour_limit: int | None = Field(default=None, ge=1)
     reply_min_interval_seconds: int | None = Field(default=None, ge=1)
+    initial_keywords: list[str] | None = Field(default=None, max_length=50)
 
 
 class UpdateCampaignRequest(CampaignRequest):
@@ -113,6 +116,166 @@ class ScheduleRequest(StrictRequest):
     def valid_timezone(cls, value: str) -> str:
         ZoneInfo(value)
         return value
+
+
+class CreateKeywordRequest(StrictRequest):
+    keyword: str = Field(min_length=1, max_length=255)
+    enabled: bool | None = None
+    priority: int | None = Field(default=None, ge=1, le=10_000)
+
+
+class UpdateKeywordRequest(StrictRequest):
+    keyword: str | None = Field(default=None, min_length=1, max_length=255)
+    enabled: bool | None = None
+    priority: int | None = Field(default=None, ge=1, le=10_000)
+
+
+class BulkCreateKeywordsRequest(StrictRequest):
+    keywords: list[str] = Field(min_length=1, max_length=50)
+    enabled: bool | None = None
+    priority: int | None = Field(default=None, ge=1, le=10_000)
+
+
+def _validate_template_content(value: str) -> str:
+    content = value.strip()
+    unknown = set(PLACEHOLDER_RE.findall(content)) - ALLOWED_TEMPLATE_VARIABLES
+    if unknown:
+        raise ValueError(f"unknown_template_variable:{sorted(unknown)[0]}")
+    return content
+
+
+class CreateReplyTemplateRequest(StrictRequest):
+    name: str = Field(min_length=1, max_length=255)
+    description: str | None = None
+    content: str = Field(min_length=1, max_length=2000)
+    platform: str = Field(default="facebook", pattern=r"^facebook$")
+    language: str = Field(default="zh-CN", pattern=r"^(zh-CN|en-US)$")
+    enabled: bool | None = None
+    priority: int | None = Field(default=None, ge=1, le=10_000)
+    is_default: bool | None = None
+
+    @field_validator("content")
+    @classmethod
+    def valid_content(cls, value: str) -> str:
+        return _validate_template_content(value)
+
+
+class UpdateReplyTemplateRequest(StrictRequest):
+    name: str | None = Field(default=None, min_length=1, max_length=255)
+    description: str | None = None
+    content: str | None = Field(default=None, min_length=1, max_length=2000)
+    platform: str | None = Field(default=None, pattern=r"^facebook$")
+    language: str | None = Field(default=None, pattern=r"^(zh-CN|en-US)$")
+    enabled: bool | None = None
+    priority: int | None = Field(default=None, ge=1, le=10_000)
+    is_default: bool | None = None
+
+    @field_validator("content")
+    @classmethod
+    def valid_content(cls, value: str | None) -> str | None:
+        return _validate_template_content(value) if value is not None else value
+
+
+class PreviewReplyTemplateRequest(StrictRequest):
+    template_id: str | None = None
+    campaign_id: str | None = None
+    content: str | None = Field(default=None, min_length=1, max_length=2000)
+    comment: dict[str, Any] | None = None
+
+    @field_validator("content")
+    @classmethod
+    def valid_content(cls, value: str | None) -> str | None:
+        return _validate_template_content(value) if value is not None else value
+
+
+def _validate_regex_pattern(value: str | None) -> str | None:
+    if value is None:
+        return value
+    pattern = value.strip()
+    if not pattern:
+        return None
+    if len(pattern) > 500:
+        raise ValueError("regex_too_long")
+    try:
+        re.compile(pattern)
+    except re.error as exc:
+        raise ValueError("invalid_regex") from exc
+    return pattern
+
+
+class ReplyMatchRuleFields(StrictRequest):
+    campaign_id: str | None = None
+    reply_template_id: str | None = None
+    name: str | None = Field(default=None, min_length=1, max_length=255)
+    enabled: bool | None = None
+    priority: int | None = Field(default=None, ge=1, le=10_000)
+    contains_any_json: list[str] | None = Field(default=None, max_length=50)
+    contains_all_json: list[str] | None = Field(default=None, max_length=50)
+    exact_text: str | None = Field(default=None, max_length=500)
+    regex_pattern: str | None = Field(default=None, max_length=500)
+    author_exclude_json: list[str] | None = Field(default=None, max_length=50)
+    comment_language: str | None = Field(default=None, pattern=r"^(any|zh-CN|en-US)$")
+    minimum_length: int | None = Field(default=None, ge=1, le=5000)
+    maximum_length: int | None = Field(default=None, ge=1, le=5000)
+
+    @field_validator("regex_pattern")
+    @classmethod
+    def valid_regex(cls, value: str | None) -> str | None:
+        return _validate_regex_pattern(value)
+
+
+class CreateReplyMatchRuleRequest(ReplyMatchRuleFields):
+    campaign_id: str
+    name: str = Field(min_length=1, max_length=255)
+
+
+class UpdateReplyMatchRuleRequest(ReplyMatchRuleFields):
+    pass
+
+
+class TestReplyMatchRuleRequest(ReplyMatchRuleFields):
+    comment_text: str = Field(min_length=1, max_length=5000)
+    author_name: str | None = Field(default=None, max_length=255)
+
+
+class RejectReplyCandidateRequest(StrictRequest):
+    reason: str = Field(min_length=1, max_length=500)
+
+    @field_validator("reason")
+    @classmethod
+    def valid_reason(cls, value: str) -> str:
+        reason = value.strip()
+        if not reason:
+            raise ValueError("reject_reason_required")
+        return reason
+
+
+class UpdateReplyCandidateContentRequest(StrictRequest):
+    rendered_reply_text: str = Field(min_length=1, max_length=2000)
+
+    @field_validator("rendered_reply_text")
+    @classmethod
+    def valid_rendered_reply_text(cls, value: str) -> str:
+        text = value.strip()
+        if not text:
+            raise ValueError("rendered_reply_invalid")
+        return text
+
+
+class BulkApproveReplyCandidatesRequest(StrictRequest):
+    candidate_ids: list[str] = Field(min_length=1, max_length=100)
+
+
+class BulkRejectReplyCandidatesRequest(BulkApproveReplyCandidatesRequest):
+    reason: str = Field(min_length=1, max_length=500)
+
+    @field_validator("reason")
+    @classmethod
+    def valid_reason(cls, value: str) -> str:
+        reason = value.strip()
+        if not reason:
+            raise ValueError("reject_reason_required")
+        return reason
 
 
 class GenericPayload(BaseModel):

@@ -206,3 +206,7 @@ docs/superpowers/
 web/saas-dashboard/node_modules/
 web/saas-dashboard/dist/
 web/saas-dashboard/tsconfig.tsbuildinfo
+web/saas-dashboard/AGENTS.md
+web/saas-dashboard/CLAUDE.md
+web/saas-dashboard/pnpm-lock.yaml
+web/saas-dashboard/src/imports/

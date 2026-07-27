@@ -73,6 +73,7 @@ def test_must_change_password_blocks_business_api_and_change_revokes_old_session
     headers = {"Authorization": f"Bearer {login['access_token']}"}
 
     assert client.get("/api/auth/me", headers=headers).status_code == 200
+    assert client.get("/api/auth/session", headers=headers).status_code == 200
     blocked = client.get("/api/dashboard/summary", headers=headers)
     changed = client.post(
         "/api/auth/change-password",
@@ -96,3 +97,14 @@ def test_login_cookie_max_age_matches_session_ttl(tmp_path):
 
     assert response.status_code == 200
     assert "Max-Age=604800" in response.headers["set-cookie"]
+
+
+def test_request_validation_error_includes_field_errors(tmp_path):
+    service, _tenant, _user, _login = _session_workspace(tmp_path)
+    client = TestClient(create_app(service=service))
+
+    response = client.post("/api/auth/login", json={"email": "session@example.com"})
+
+    assert response.status_code == 422
+    assert response.json()["error"]["code"] == "invalid_request"
+    assert {"field": "password", "message": "Field required"} in response.json()["error"]["fields"]
