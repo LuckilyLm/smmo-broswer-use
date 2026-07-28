@@ -22,7 +22,7 @@ class ProductionConfig:
     runtime_host: str
     browser_cdp_port_start: int
     browser_cdp_port_end: int
-    chrome_executable: str | None
+    browser_headless: bool
     browser_idle_timeout_minutes: int
     max_queued_executions_per_tenant: int
     worker_concurrency: int
@@ -49,6 +49,15 @@ class ProductionConfig:
     llm_endpoint: str | None
     llm_api_key: str | None
     llm_model: str
+    artifact_s3_enabled: bool
+    artifact_s3_endpoint: str | None
+    artifact_s3_access_key: str | None
+    artifact_s3_secret_key: str | None
+    artifact_s3_bucket: str | None
+    artifact_s3_region: str
+    artifact_s3_prefix: str
+    artifact_s3_public_base_url: str | None
+    artifact_s3_secure: bool
     system_send_enabled: bool
 
     @property
@@ -61,12 +70,12 @@ class ProductionConfig:
 
     @property
     def local_browser_supported(self) -> bool:
-        return self.browser_platform == "Windows"
+        return self.runtime_host == "local"
 
     @property
     def runtime_available(self) -> bool:
         return (
-            self.deployment_mode == "windows-local"
+            self.deployment_mode == "browser-use"
             and self.runtime_host == "local"
             and self.local_browser_supported
         )
@@ -77,6 +86,8 @@ class ProductionConfig:
             "runtime_available": self.runtime_available,
             "browser_platform": self.browser_platform,
             "local_browser_supported": self.local_browser_supported,
+            "browser_backend": "browser-use",
+            "browser_headless": self.browser_headless,
         }
 
     @classmethod
@@ -98,12 +109,12 @@ class ProductionConfig:
         if is_production and not database_url:
             raise RuntimeError("DATABASE_URL is required in production")
 
-        deployment_mode = env.get("SAAS_DEPLOYMENT_MODE", "windows-local").strip().lower()
-        if deployment_mode not in {"windows-local", "control-plane-only"}:
-            raise RuntimeError("SAAS_DEPLOYMENT_MODE must be windows-local or control-plane-only")
+        deployment_mode = env.get("SAAS_DEPLOYMENT_MODE", "browser-use").strip().lower()
+        if deployment_mode not in {"browser-use", "control-plane-only"}:
+            raise RuntimeError("SAAS_DEPLOYMENT_MODE must be browser-use or control-plane-only")
         runtime_host = env.get("SAAS_RUNTIME_HOST", "local").strip().lower()
-        if runtime_host not in {"local", "windows-agent"}:
-            raise RuntimeError("SAAS_RUNTIME_HOST must be local or windows-agent")
+        if runtime_host != "local":
+            raise RuntimeError("SAAS_RUNTIME_HOST must be local")
         cdp_port_start = _int(env, "SAAS_BROWSER_CDP_PORT_START", 9300, minimum=1)
         cdp_port_end = _int(env, "SAAS_BROWSER_CDP_PORT_END", 9399, minimum=1)
         if cdp_port_end < cdp_port_start:
@@ -123,7 +134,7 @@ class ProductionConfig:
             runtime_host=runtime_host,
             browser_cdp_port_start=cdp_port_start,
             browser_cdp_port_end=cdp_port_end,
-            chrome_executable=env.get("SAAS_CHROME_EXECUTABLE", "").strip() or None,
+            browser_headless=_bool(env.get("SAAS_BROWSER_HEADLESS"), default=platform.system() != "Windows"),
             browser_idle_timeout_minutes=_int(env, "SAAS_BROWSER_IDLE_TIMEOUT_MINUTES", 30, minimum=1),
             max_queued_executions_per_tenant=_int(env, "SAAS_MAX_QUEUED_EXECUTIONS_PER_TENANT", 50, minimum=1),
             worker_concurrency=_int(env, "SAAS_WORKER_CONCURRENCY", 1, minimum=1),
@@ -147,9 +158,18 @@ class ProductionConfig:
             trust_proxy=_bool(env.get("SAAS_TRUST_PROXY"), default=False),
             llm_input_cost_per_1m=_optional_float(env, "SAAS_LLM_INPUT_COST_PER_1M"),
             llm_output_cost_per_1m=_optional_float(env, "SAAS_LLM_OUTPUT_COST_PER_1M"),
-            llm_endpoint=env.get("OPENAI_ENDPOINT", "").strip() or env.get("OPENAI_BASE_URL", "").strip() or None,
+            llm_endpoint=env.get("SAAS_LLM_ENDPOINT", "").strip() or env.get("OPENAI_ENDPOINT", "").strip() or env.get("OPENAI_BASE_URL", "").strip() or None,
             llm_api_key=env.get("OPENAI_API_KEY", "").strip() or None,
-            llm_model=env.get("FACEBOOK_LEADS_LLM_MODEL", "gpt-5.5").strip() or "gpt-5.5",
+            llm_model=env.get("SAAS_LLM_MODEL", "").strip() or env.get("FACEBOOK_LEADS_LLM_MODEL", "gpt-5.5").strip() or "gpt-5.5",
+            artifact_s3_enabled=_bool(env.get("SAAS_ARTIFACT_S3_ENABLED"), default=False),
+            artifact_s3_endpoint=env.get("SAAS_ARTIFACT_S3_ENDPOINT", "").strip() or None,
+            artifact_s3_access_key=env.get("SAAS_ARTIFACT_S3_ACCESS_KEY", "").strip() or None,
+            artifact_s3_secret_key=env.get("SAAS_ARTIFACT_S3_SECRET_KEY", "").strip() or None,
+            artifact_s3_bucket=env.get("SAAS_ARTIFACT_S3_BUCKET", "").strip() or None,
+            artifact_s3_region=env.get("SAAS_ARTIFACT_S3_REGION", "us-east-1").strip() or "us-east-1",
+            artifact_s3_prefix=env.get("SAAS_ARTIFACT_S3_PREFIX", "saas-artifacts").strip().strip("/"),
+            artifact_s3_public_base_url=env.get("SAAS_ARTIFACT_S3_PUBLIC_BASE_URL", "").strip().rstrip("/") or None,
+            artifact_s3_secure=_bool(env.get("SAAS_ARTIFACT_S3_SECURE"), default=True),
             system_send_enabled=_bool(env.get("SAAS_SYSTEM_SEND_ENABLED"), default=False),
         )
 

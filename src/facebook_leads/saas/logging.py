@@ -6,6 +6,16 @@ import re
 from datetime import datetime, timezone
 from typing import Any
 
+_STANDARD_LOG_RECORD_KEYS = set(logging.makeLogRecord({}).__dict__) | {"message", "asctime"}
+
+
+class ContextLoggerAdapter(logging.LoggerAdapter):
+    def process(self, msg: Any, kwargs: dict[str, Any]) -> tuple[Any, dict[str, Any]]:
+        adapter_extra = self.extra if isinstance(self.extra, dict) else {}
+        call_extra = kwargs.get("extra") if isinstance(kwargs.get("extra"), dict) else {}
+        kwargs["extra"] = {**adapter_extra, **call_extra}
+        return msg, kwargs
+
 
 class JsonFormatter(logging.Formatter):
     def format(self, record: logging.LogRecord) -> str:
@@ -20,17 +30,24 @@ class JsonFormatter(logging.Formatter):
             "queue_item_id": getattr(record, "queue_item_id", None),
             "message": _sanitize_text(record.getMessage()),
         }
+        for key, value in record.__dict__.items():
+            if key in _STANDARD_LOG_RECORD_KEYS or key in payload:
+                continue
+            payload[str(key)] = sanitize(value)
+        if record.exc_info:
+            payload["exception_type"] = record.exc_info[0].__name__ if record.exc_info[0] else None
+            payload["exception"] = _sanitize_text(self.formatException(record.exc_info))
         return json.dumps(sanitize(payload), ensure_ascii=True)
 
 
-def configure_logging(service: str, level: str = "INFO") -> logging.LoggerAdapter:
+def configure_logging(service: str, level: str = "INFO") -> ContextLoggerAdapter:
     handler = logging.StreamHandler()
     handler.setFormatter(JsonFormatter())
     logger = logging.getLogger(f"facebook_leads.{service}")
     logger.handlers = [handler]
     logger.setLevel(level)
     logger.propagate = False
-    return logging.LoggerAdapter(logger, {"service": service})
+    return ContextLoggerAdapter(logger, {"service": service})
 
 
 SENSITIVE_KEYS = {
@@ -60,10 +77,10 @@ def sanitize(value: Any) -> Any:
     return value
 
 
-def log_context(logger: logging.LoggerAdapter, **context: Any) -> logging.LoggerAdapter:
+def log_context(logger: logging.LoggerAdapter, **context: Any) -> ContextLoggerAdapter:
     allowed = {"tenant_id", "campaign_id", "execution_id", "runtime_id", "queue_item_id"}
     extra = logger.extra if isinstance(logger.extra, dict) else {}
-    return logging.LoggerAdapter(logger.logger, {**extra, **{key: value for key, value in context.items() if key in allowed}})
+    return ContextLoggerAdapter(logger.logger, {**extra, **{key: value for key, value in context.items() if key in allowed}})
 
 
 def _sanitize_text(value: str) -> str:

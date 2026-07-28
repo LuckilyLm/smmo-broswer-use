@@ -39,12 +39,19 @@ class CreatePlatformAccountRequest(StrictRequest):
     external_account_name: str | None = Field(default=None, max_length=255)
 
 
+class UpdatePlatformAccountRequest(StrictRequest):
+    display_name: str | None = Field(default=None, min_length=1, max_length=255)
+    external_account_id: str | None = Field(default=None, max_length=255)
+    external_account_name: str | None = Field(default=None, max_length=255)
+
+
 class ResetProfileRequest(StrictRequest):
     confirm: str
 
 
 class CampaignRequest(StrictRequest):
     name: str | None = Field(default=None, min_length=1, max_length=255)
+    description: str | None = None
     platform_account_id: str | None = None
     status: str | None = None
     target_policy: str | None = None
@@ -69,10 +76,14 @@ class CampaignRequest(StrictRequest):
     reply_per_minute_limit: int | None = Field(default=None, ge=1)
     reply_per_hour_limit: int | None = Field(default=None, ge=1)
     reply_min_interval_seconds: int | None = Field(default=None, ge=1)
+    target_regions_json: list[str] | None = Field(default=None, max_length=50)
+    content_types_json: list[str] | None = Field(default=None, max_length=20)
+    content_language: str | None = Field(default=None, min_length=2, max_length=20)
 
 
 class CreateCampaignRequest(StrictRequest):
     name: str = Field(min_length=1, max_length=255)
+    description: str | None = None
     platform_account_id: str
     status: str | None = None
     target_policy: str | None = None
@@ -97,6 +108,9 @@ class CreateCampaignRequest(StrictRequest):
     reply_per_minute_limit: int | None = Field(default=None, ge=1)
     reply_per_hour_limit: int | None = Field(default=None, ge=1)
     reply_min_interval_seconds: int | None = Field(default=None, ge=1)
+    target_regions_json: list[str] | None = Field(default=None, max_length=50)
+    content_types_json: list[str] | None = Field(default=None, max_length=20)
+    content_language: str | None = Field(default=None, min_length=2, max_length=20)
     initial_keywords: list[str] | None = Field(default=None, max_length=50)
 
 
@@ -276,6 +290,50 @@ class BulkRejectReplyCandidatesRequest(BulkApproveReplyCandidatesRequest):
         if not reason:
             raise ValueError("reject_reason_required")
         return reason
+
+
+class UpdateLeadRequest(StrictRequest):
+    status: str | None = Field(default=None, pattern=r"^(new|open|assigned|contacted|qualified|invalid|archived)$")
+    manual_intent_level: str | None = Field(default=None, pattern=r"^(low|medium|high|unknown)$")
+    assigned_user_id: str | None = None
+    contacted_at: datetime | None = None
+    invalid_reason: str | None = Field(default=None, max_length=1000)
+
+
+class CreateLeadNoteRequest(StrictRequest):
+    note: str = Field(min_length=1, max_length=5000)
+    metadata_json: dict[str, Any] | None = None
+
+    @field_validator("note")
+    @classmethod
+    def valid_note(cls, value: str) -> str:
+        note = value.strip()
+        if not note:
+            raise ValueError("note_required")
+        return note
+
+
+class AssignLeadRequest(StrictRequest):
+    assigned_user_id: str
+
+
+class MarkLeadInvalidRequest(StrictRequest):
+    invalid_reason: str = Field(min_length=1, max_length=1000)
+
+    @field_validator("invalid_reason")
+    @classmethod
+    def valid_reason(cls, value: str) -> str:
+        reason = value.strip()
+        if not reason:
+            raise ValueError("invalid_reason_required")
+        return reason
+
+
+class BulkUpdateLeadsRequest(StrictRequest):
+    lead_ids: list[str] = Field(min_length=1, max_length=100)
+    status: str | None = Field(default=None, pattern=r"^(new|open|assigned|contacted|qualified|invalid|archived)$")
+    manual_intent_level: str | None = Field(default=None, pattern=r"^(low|medium|high|unknown)$")
+    assigned_user_id: str | None = None
 
 
 class GenericPayload(BaseModel):

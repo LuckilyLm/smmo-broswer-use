@@ -33,6 +33,7 @@ class ProviderRunRequest:
     llm_enabled: bool
     history_path: str
     runs_root: str
+    custom_positive_keywords: tuple[str, ...] = ()
     run_context: PlatformRunContext | None = None
 
 
@@ -82,6 +83,7 @@ class FacebookProvider(BasePlatformProvider):
             history_path=request.history_path,
             runs_root=request.runs_root,
             target_policy=build_target_policy_config(policy=request.target_policy),
+            custom_positive_keywords=request.custom_positive_keywords,
         )
         result = await self.runner(config)
         result["send_disabled"] = True

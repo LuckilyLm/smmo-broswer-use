@@ -2,9 +2,46 @@ FROM python:3.11-slim-bookworm
 
 ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1
 WORKDIR /app
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    dbus \
+    fonts-liberation \
+    fonts-noto-color-emoji \
+    fonts-wqy-zenhei \
+    fluxbox \
+    libasound2 \
+    libatk-bridge2.0-0 \
+    libatk1.0-0 \
+    libcups2 \
+    libdbus-1-3 \
+    libdrm2 \
+    libgbm1 \
+    libgtk-3-0 \
+    libnspr4 \
+    libnss3 \
+    libx11-xcb1 \
+    libxcomposite1 \
+    libxdamage1 \
+    libxfixes3 \
+    libxrandr2 \
+    libxss1 \
+    novnc \
+    procps \
+    wget \
+    websockify \
+    x11vnc \
+    xauth \
+    xdg-utils \
+    xvfb \
+    && rm -rf /var/lib/apt/lists/*
 COPY requirements.saas.txt ./
 RUN pip install --no-cache-dir -r requirements.saas.txt
+ENV PLAYWRIGHT_BROWSERS_PATH=/ms-browsers
+RUN mkdir -p "$PLAYWRIGHT_BROWSERS_PATH" && playwright install chromium
 COPY . .
-RUN useradd --create-home --uid 10001 saas && mkdir -p /data/browser_profiles /app/artifacts && chown -R saas:saas /data /app/artifacts
+RUN chmod +x /app/deploy/docker/saas-api-entrypoint.sh \
+    && useradd --create-home --uid 10001 saas \
+    && mkdir -p /data/browser_profiles /app/artifacts \
+    && chown -R saas:saas /data /app/artifacts /tmp
 USER saas
+ENTRYPOINT ["/app/deploy/docker/saas-api-entrypoint.sh"]
 CMD ["uvicorn", "src.facebook_leads.saas.api:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "1"]

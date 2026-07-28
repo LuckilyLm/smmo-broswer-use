@@ -109,7 +109,7 @@ browser_runtimes = Table(
     Column("id", String(64), primary_key=True),
     Column("tenant_id", String(64), nullable=False),
     Column("platform_account_id", String(64), nullable=False),
-    Column("runtime_type", String(50), nullable=False, default="local_chrome_cdp"),
+    Column("runtime_type", String(50), nullable=False, default="browser_use_chromium_cdp"),
     Column("status", String(50), nullable=False, default="stopped"),
     Column("profile_path", Text, nullable=False),
     Column("cdp_port", Integer, nullable=False),
@@ -131,6 +131,7 @@ campaigns = Table(
     Column("id", String(64), primary_key=True),
     Column("tenant_id", String(64), nullable=False),
     Column("name", String(255), nullable=False),
+    Column("description", Text),
     Column("platform_account_id", String(64), nullable=False),
     Column("status", String(50), nullable=False, default="draft"),
     Column("target_policy", String(50), nullable=False, default="discovery_only"),
@@ -155,6 +156,9 @@ campaigns = Table(
     Column("reply_per_minute_limit", Integer, nullable=False, default=1),
     Column("reply_per_hour_limit", Integer, nullable=False, default=10),
     Column("reply_min_interval_seconds", Integer, nullable=False, default=60),
+    Column("target_regions_json", JsonType, nullable=False, default=list),
+    Column("content_types_json", JsonType, nullable=False, default=list),
+    Column("content_language", String(20), nullable=False, default="any"),
     Column("deleted_at", DateTime(timezone=True)),
     Column("created_at", DateTime(timezone=True), nullable=False, default=utc_now),
     Column("updated_at", DateTime(timezone=True), nullable=False, default=utc_now),
@@ -357,6 +361,11 @@ leads = Table(
     Column("ownership_status", String(50)),
     Column("reply_allowed", Boolean, nullable=False, default=False),
     Column("status", String(50), nullable=False, default="new"),
+    Column("manual_intent_level", String(50)),
+    Column("assigned_user_id", String(64)),
+    Column("contacted_at", DateTime(timezone=True)),
+    Column("invalid_reason", Text),
+    Column("updated_by", String(64)),
     Column("matched_search_keywords", JsonType, nullable=False, default=list),
     Column("first_discovered_at", DateTime(timezone=True)),
     Column("last_discovered_at", DateTime(timezone=True)),
@@ -364,6 +373,19 @@ leads = Table(
     Column("created_at", DateTime(timezone=True), nullable=False, default=utc_now),
     Column("updated_at", DateTime(timezone=True), nullable=False, default=utc_now),
     UniqueConstraint("tenant_id", "campaign_id", "comment_fingerprint", name="uq_leads_tenant_campaign_fingerprint"),
+)
+
+lead_notes = Table(
+    "lead_notes",
+    metadata,
+    Column("id", String(64), primary_key=True),
+    Column("tenant_id", String(64), nullable=False),
+    Column("lead_id", String(64), nullable=False),
+    Column("author_user_id", String(64), nullable=False),
+    Column("note", Text, nullable=False),
+    Column("metadata_json", JsonType, nullable=False, default=dict),
+    Column("created_at", DateTime(timezone=True), nullable=False, default=utc_now),
+    Column("updated_at", DateTime(timezone=True), nullable=False, default=utc_now),
 )
 
 executions = Table(
@@ -594,6 +616,9 @@ Index("ix_leads_tenant_created_at", leads.c.tenant_id, leads.c.created_at)
 Index("ix_leads_tenant_status", leads.c.tenant_id, leads.c.status)
 Index("ix_leads_tenant_campaign", leads.c.tenant_id, leads.c.campaign_id)
 Index("ix_leads_comment_fingerprint", leads.c.comment_fingerprint)
+Index("ix_leads_tenant_assigned", leads.c.tenant_id, leads.c.assigned_user_id)
+Index("ix_leads_tenant_intent", leads.c.tenant_id, leads.c.final_intent_level, leads.c.manual_intent_level)
+Index("ix_lead_notes_tenant_lead", lead_notes.c.tenant_id, lead_notes.c.lead_id)
 Index("ix_executions_tenant_started_at", executions.c.tenant_id, executions.c.started_at)
 Index("ix_executions_tenant_campaign", executions.c.tenant_id, executions.c.campaign_id)
 Index("ix_token_usage_tenant_created_at", token_usage.c.tenant_id, token_usage.c.created_at)
@@ -641,6 +666,7 @@ TABLES = {
         reply_candidates,
         reply_records,
         leads,
+        lead_notes,
         executions,
         execution_queue_items,
         execution_keywords,

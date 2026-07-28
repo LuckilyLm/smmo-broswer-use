@@ -3,7 +3,6 @@ from __future__ import annotations
 import asyncio
 import json
 import os
-from types import SimpleNamespace
 from pathlib import Path
 
 import pytest
@@ -18,14 +17,6 @@ from src.facebook_leads.saas.runtime import BrowserRuntimeRegistry
 from src.facebook_leads.saas.service import SaaSService
 from src.facebook_leads.saas.storage import SaaSStorage
 from src.facebook_leads.saas.worker import ExecutionWorker
-
-
-def test_windows_pid_check_does_not_decode_localized_tasklist_output(monkeypatch):
-    if os.name != "nt":
-        pytest.skip("Windows-specific PID probe")
-    monkeypatch.setattr(runtime_module.subprocess, "run", lambda *_args, **_kwargs: SimpleNamespace(stdout=b'"chrome.exe","4508"'))
-
-    assert runtime_module._pid_exists(4508) is True
 
 
 def test_runtime_retries_cdp_port_unique_collision(tmp_path, monkeypatch):
@@ -63,7 +54,7 @@ def service_with_registry(tmp_path: Path, *, login_status: str = "logged_in", ru
     async def login_checker(_cdp_url: str) -> str:
         return login_status
 
-    registry = BrowserRuntimeRegistry(storage, profiles_root=tmp_path / "profiles", chrome_executable=str(tmp_path / "chrome.exe"), login_checker=login_checker)
+    registry = BrowserRuntimeRegistry(storage, profiles_root=tmp_path / "profiles", chrome_executable=str(tmp_path / "chromium"), login_checker=login_checker)
     providers = {"facebook": FacebookProvider(runner=runner or fake_runner(tmp_path))}
     return SaaSService(storage, providers=providers, artifacts_root=tmp_path / "artifacts", runtime_registry=registry)
 
@@ -125,19 +116,13 @@ def fake_runner(tmp_path: Path, *, delay: float = 0.0, seen_configs: list | None
     return run
 
 
-class FakePopen:
-    next_pid = 42000
-
-    def __init__(self, *_args, **_kwargs):
-        FakePopen.next_pid += 1
-        self.pid = FakePopen.next_pid
-
-
 def make_runtime_running(service: SaaSService, context: TenantContext, account: dict, monkeypatch) -> dict:
-    Path(service.runtime_registry.chrome_executable).write_text("fake", encoding="utf-8")
-    monkeypatch.setattr(runtime_module.subprocess, "Popen", FakePopen)
-    monkeypatch.setattr(runtime_module, "_terminate_process_tree", lambda _pid: None)
-    monkeypatch.setattr(runtime_module, "_pid_exists", lambda _pid: True)
+    async def fake_start_browser_use(_runtime, *, url):
+        del url
+
+    monkeypatch.setattr(service.runtime_registry, "_start_browser_use", fake_start_browser_use)
+    monkeypatch.setattr(service.runtime_registry, "_close_session", lambda _runtime_id: None)
+    monkeypatch.setattr(runtime_module, "_wait_for_cdp", lambda *_args, **_kwargs: True)
     monkeypatch.setattr(runtime_module, "_cdp_reachable", lambda _url: True)
     runtime = service.runtime_registry.start_runtime(context, account["id"])
     asyncio.run(service.check_platform_login(context, account["id"]))
@@ -154,7 +139,8 @@ def test_runtime_profile_and_port_isolation(tmp_path, monkeypatch):
 
     assert runtime_a["profile_path"] != runtime_b["profile_path"]
     assert runtime_a["cdp_port"] != runtime_b["cdp_port"]
-    assert runtime_a["browser_pid"] != runtime_b["browser_pid"]
+    assert runtime_a["browser_pid"]
+    assert runtime_b["browser_pid"]
     assert f"tenant_{ctx.tenant_id}" in runtime_a["profile_path"]
     assert f"platform_account_{account_a['id']}" in runtime_a["profile_path"]
 
@@ -165,7 +151,7 @@ def test_runtime_start_stop_restart_and_missing_chrome(tmp_path, monkeypatch):
 
     missing = service.runtime_registry.start_runtime(ctx, account["id"])
     assert missing["status"] == "error"
-    assert "chrome" in (missing["last_error"] or "").lower()
+    assert "filenotfounderror" in (missing["last_error"] or "").lower()
 
     runtime = make_runtime_running(service, ctx, account, monkeypatch)
     assert runtime["status"] == "running"
@@ -178,19 +164,18 @@ def test_runtime_start_stop_restart_and_missing_chrome(tmp_path, monkeypatch):
 def test_runtime_start_reports_cdp_timeout_and_stops_process(tmp_path, monkeypatch):
     service = service_with_registry(tmp_path)
     ctx, account, _campaign, _session = workspace(service, "cdp-timeout")
-    Path(service.runtime_registry.chrome_executable).write_text("fake", encoding="utf-8")
-    terminated: list[int] = []
-    monkeypatch.setattr(runtime_module.subprocess, "Popen", FakePopen)
+
+    async def fake_start_browser_use(_runtime, *, url):
+        del url
+
+    monkeypatch.setattr(service.runtime_registry, "_start_browser_use", fake_start_browser_use)
     monkeypatch.setattr(runtime_module, "_wait_for_cdp", lambda *_args, **_kwargs: False)
-    monkeypatch.setattr(runtime_module, "_pid_exists", lambda _pid: True)
-    monkeypatch.setattr(runtime_module, "_terminate_process_tree", terminated.append)
 
     runtime = service.runtime_registry.start_runtime(ctx, account["id"])
 
     assert runtime["status"] == "error"
     assert runtime["browser_pid"] is None
-    assert runtime["last_error"] == "Chrome started but CDP did not become reachable"
-    assert len(terminated) == 1
+    assert runtime["last_error"] == "browser-use started but CDP did not become reachable"
 
 
 @pytest.mark.parametrize("login_status", ["logged_in", "logged_out", "checkpoint", "captcha"])
@@ -203,6 +188,75 @@ def test_login_statuses(tmp_path, monkeypatch, login_status):
 
     assert result["login_status"] == login_status
     assert result["connection_status"] == ("connected" if login_status == "logged_in" else "login_required")
+
+
+def test_platform_account_list_reconciles_connected_login_status(tmp_path):
+    service = service_with_registry(tmp_path)
+    ctx, account, _campaign, _session = workspace(service)
+    service.storage.update_by_id(
+        "platform_accounts",
+        account["id"],
+        {"login_status": "logged_in", "connection_status": "login_required"},
+        tenant_id=ctx.tenant_id,
+    )
+
+    accounts = service.list_platform_accounts(ctx)
+
+    listed = next(item for item in accounts if item["id"] == account["id"])
+    persisted = service.storage.get_by_id("platform_accounts", account["id"], tenant_id=ctx.tenant_id)
+    assert listed["login_status"] == "logged_in"
+    assert listed["connection_status"] == "connected"
+    assert persisted["connection_status"] == "connected"
+
+
+def test_runtime_restores_login_state_snapshot_from_account_profile(tmp_path):
+    storage = SaaSStorage(tmp_path / "snapshot.sqlite")
+    registry = BrowserRuntimeRegistry(storage, profiles_root=tmp_path / "profiles")
+    profile = tmp_path / "profiles" / "tenant_tenant_1" / "platform_account_account_1" / "profile"
+    profile.mkdir(parents=True)
+    snapshot = profile / "saas_login_state.json"
+    snapshot.write_text(
+        json.dumps(
+            {
+                "cookies": [
+                    {
+                        "name": "c_user",
+                        "value": "123",
+                        "domain": ".facebook.com",
+                        "path": "/",
+                        "expires": -1,
+                        "httpOnly": True,
+                        "secure": True,
+                        "sameSite": "Lax",
+                    }
+                ],
+                "origins": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    class FakeContext:
+        def __init__(self):
+            self.cookies = []
+
+        async def add_cookies(self, cookies):
+            self.cookies.extend(cookies)
+
+    class FakeBrowser:
+        def __init__(self):
+            self.contexts = [FakeContext()]
+
+    fake_browser = FakeBrowser()
+
+    asyncio.run(
+        registry._restore_login_state_snapshot(
+            {"id": "runtime_1", "tenant_id": "tenant_1", "platform_account_id": "account_1", "profile_path": str(profile)},
+            fake_browser,
+        )
+    )
+
+    assert fake_browser.contexts[0].cookies[0]["name"] == "c_user"
 
 
 def test_cdp_unreachable_and_crash_mark_unhealthy(tmp_path, monkeypatch):
@@ -222,12 +276,9 @@ def test_cdp_unreachable_and_crash_mark_unhealthy(tmp_path, monkeypatch):
         {"status": "running", "browser_pid": 99999},
         tenant_id=ctx.tenant_id,
     )
-    monkeypatch.setattr(runtime_module, "_pid_exists", lambda _pid: False)
-
     crashed = service.runtime_registry.reconcile_runtime(ctx, runtime["id"])
 
-    assert crashed["status"] == "stopped"
-    assert crashed["browser_pid"] is None
+    assert crashed["status"] == "unhealthy"
 
 
 def test_runtime_api_tenant_isolation_and_safe_fields(tmp_path, monkeypatch):

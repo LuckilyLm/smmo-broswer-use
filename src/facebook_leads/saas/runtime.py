@@ -1,15 +1,19 @@
 from __future__ import annotations
 
 import asyncio
+import json
+import logging
 import os
 import shutil
 import socket
 import subprocess
+import threading
 import time
 from pathlib import Path
 from typing import Any, Awaitable, Callable
 from urllib.error import URLError
 from urllib.request import urlopen
+from browser_use.browser.browser import Browser, BrowserConfig
 from sqlalchemy.exc import IntegrityError
 
 from src.facebook_leads.facebook.orchestrator import default_health_check
@@ -20,6 +24,7 @@ from .storage import SaaSStorage
 
 
 LoginChecker = Callable[[str], Awaitable[str]]
+logger = logging.getLogger(__name__)
 
 
 class BrowserRuntimeError(RuntimeError):
@@ -39,6 +44,7 @@ class BrowserRuntimeRegistry:
         cdp_port_start: int = 9300,
         cdp_port_end: int = 9399,
         runtime_host: str = "local",
+        browser_headless: bool = False,
         allow_chrome_discovery: bool = True,
     ) -> None:
         self.storage = storage
@@ -48,6 +54,10 @@ class BrowserRuntimeRegistry:
         self.cdp_port_start = cdp_port_start
         self.cdp_port_end = cdp_port_end
         self.runtime_host = runtime_host
+        self.browser_headless = browser_headless
+        self._sessions: dict[str, Browser] = {}
+        self._browser_pids: dict[str, int] = {}
+        self._browser_loop = _BrowserUseRuntimeLoop()
 
     def get_runtime(self, context: TenantContext, account_id: str) -> dict[str, Any] | None:
         return self.storage.find_one("browser_runtimes", {"tenant_id": context.tenant_id, "platform_account_id": account_id})
@@ -57,13 +67,26 @@ class BrowserRuntimeRegistry:
 
     def create_runtime(self, context: TenantContext, account_id: str) -> dict[str, Any]:
         self._require_local_runtime()
+        profile_path = self.profile_path(context.tenant_id, account_id)
         existing = self.get_runtime(context, account_id)
         if existing:
-            return existing
+            if self._runtime_matches_current_backend(context.tenant_id, account_id, existing):
+                return existing
+            logger.warning(
+                "discarding incompatible browser runtime",
+                extra={
+                    "tenant_id": context.tenant_id,
+                    "platform_account_id": account_id,
+                    "runtime_id": existing["id"],
+                    "runtime_type": existing.get("runtime_type"),
+                    "profile_path": existing.get("profile_path"),
+                },
+            )
+            self.storage.delete_by_id("browser_runtimes", existing["id"], tenant_id=context.tenant_id)
+            self.storage.update_by_id("platform_accounts", account_id, {"browser_runtime_id": None}, tenant_id=context.tenant_id)
         account = self.storage.get_by_id("platform_accounts", account_id, tenant_id=context.tenant_id)
         if not account:
             raise BrowserRuntimeError("platform_account_not_found", "platform account not found")
-        profile_path = self.profile_path(context.tenant_id, account_id)
         profile_path.mkdir(parents=True, exist_ok=True)
         runtime = None
         for _attempt in range(5):
@@ -74,7 +97,7 @@ class BrowserRuntimeRegistry:
                     {
                         "tenant_id": context.tenant_id,
                         "platform_account_id": account_id,
-                        "runtime_type": "local_chrome_cdp",
+                        "runtime_type": "browser_use_chromium_cdp",
                         "status": "stopped",
                         "profile_path": str(profile_path),
                         "cdp_port": cdp_port,
@@ -98,34 +121,26 @@ class BrowserRuntimeRegistry:
         runtime = self.get_runtime_by_id(context, runtime["id"]) or runtime
         if runtime["status"] == "running" and self.health_check(context, runtime["id"])["reachable"]:
             return self.get_runtime_by_id(context, runtime["id"]) or runtime
-        if not self.chrome_executable or not Path(self.chrome_executable).exists():
-            return self._mark_error(context, runtime, "missing_chrome_executable", "SAAS_CHROME_EXECUTABLE does not point to chrome.exe")
         Path(runtime["profile_path"]).mkdir(parents=True, exist_ok=True)
         self.storage.update_by_id("browser_runtimes", runtime["id"], {"status": "starting", "last_error": None}, tenant_id=context.tenant_id)
-        process = subprocess.Popen(
-            [
-                self.chrome_executable,
-                f"--remote-debugging-port={runtime['cdp_port']}",
-                f"--user-data-dir={runtime['profile_path']}",
-                "--no-first-run",
-                "--no-default-browser-check",
-                "--new-window",
-                url,
-            ],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
+        try:
+            self._run_async(self._start_browser_use(runtime, url=url))
+        except Exception as exc:
+            logger.exception(
+                "browser-use runtime start failed",
+                extra={"tenant_id": context.tenant_id, "platform_account_id": account_id, "runtime_id": runtime["id"], "error": type(exc).__name__},
+            )
+            return self._mark_error(context, runtime, "browser_use_start_failed", f"{type(exc).__name__}: {exc}")
         updated = self.storage.update_by_id(
             "browser_runtimes",
             runtime["id"],
-            {"status": "running", "browser_pid": process.pid, "started_at": utc_now(), "stopped_at": None, "last_error": None},
+            {"status": "running", "browser_pid": self._browser_pids.get(runtime["id"]) or os.getpid(), "started_at": utc_now(), "stopped_at": None, "last_error": None},
             tenant_id=context.tenant_id,
         )
         if not _wait_for_cdp(runtime["cdp_url"], timeout_seconds=8):
-            if _pid_exists(process.pid):
-                _terminate_process_tree(process.pid)
+            self._close_session(runtime["id"])
             self.storage.update_by_id("browser_runtimes", runtime["id"], {"browser_pid": None}, tenant_id=context.tenant_id)
-            return self._mark_error(context, runtime, "cdp_start_timeout", "Chrome started but CDP did not become reachable")
+            return self._mark_error(context, runtime, "cdp_start_timeout", "browser-use started but CDP did not become reachable")
         return updated or runtime
 
     def stop_runtime(self, context: TenantContext, account_id: str) -> dict[str, Any]:
@@ -133,9 +148,7 @@ class BrowserRuntimeRegistry:
         runtime = self.get_runtime(context, account_id)
         if not runtime:
             raise BrowserRuntimeError("runtime_not_found", "runtime not found")
-        pid = runtime.get("browser_pid")
-        if pid and _pid_exists(int(pid)):
-            _terminate_process_tree(int(pid))
+        self._close_session(runtime["id"])
         return self.storage.update_by_id(
             "browser_runtimes",
             runtime["id"],
@@ -213,14 +226,23 @@ class BrowserRuntimeRegistry:
             },
             tenant_id=context.tenant_id,
         )
+        if login_status == "logged_in":
+            snapshot = await self._persist_login_state_snapshot(runtime)
+            if snapshot:
+                metadata = dict((account or {}).get("connection_metadata") or {})
+                metadata["login_state_snapshot"] = snapshot
+                account = self.storage.update_by_id(
+                    "platform_accounts",
+                    account_id,
+                    {"connection_metadata": metadata},
+                    tenant_id=context.tenant_id,
+                ) or account
         return {"login_status": login_status, "connection_status": connection_status, "account": safe_account(account or {}), "runtime": safe_runtime(runtime)}
 
     def reconcile_runtime(self, context: TenantContext, runtime_id: str) -> dict[str, Any] | None:
         runtime = self.get_runtime_by_id(context, runtime_id)
         if not runtime:
             return None
-        if runtime["status"] == "running" and runtime.get("browser_pid") and not _pid_exists(int(runtime["browser_pid"])):
-            return self.storage.update_by_id("browser_runtimes", runtime_id, {"status": "stopped", "browser_pid": None}, tenant_id=context.tenant_id)
         if runtime["status"] == "running" and not _cdp_reachable(runtime["cdp_url"]):
             return self.storage.update_by_id("browser_runtimes", runtime_id, {"status": "unhealthy", "last_error": "CDP unreachable"}, tenant_id=context.tenant_id)
         return runtime
@@ -246,7 +268,7 @@ class BrowserRuntimeRegistry:
 
     def _require_local_runtime(self) -> None:
         if self.runtime_host != "local":
-            raise BrowserRuntimeError("runtime_host_not_implemented", "windows-agent runtime host is not implemented")
+            raise BrowserRuntimeError("runtime_host_not_implemented", "browser-use local runtime host is required")
 
     def profile_path(self, tenant_id: str, account_id: str) -> Path:
         return (self.profiles_root / f"tenant_{tenant_id}" / f"platform_account_{account_id}" / "profile").resolve()
@@ -261,6 +283,203 @@ class BrowserRuntimeRegistry:
     def _mark_error(self, context: TenantContext, runtime: dict[str, Any], error_type: str, message: str) -> dict[str, Any]:
         self.storage.update_by_id("platform_accounts", runtime["platform_account_id"], {"last_connection_error": message}, tenant_id=context.tenant_id)
         return self.storage.update_by_id("browser_runtimes", runtime["id"], {"status": "error", "last_error": message}, tenant_id=context.tenant_id) or runtime
+
+    def _runtime_matches_current_backend(self, tenant_id: str, account_id: str, runtime: dict[str, Any]) -> bool:
+        return (
+            runtime.get("runtime_type") == "browser_use_chromium_cdp"
+            and Path(str(runtime.get("profile_path") or "")).resolve() == self.profile_path(tenant_id, account_id)
+        )
+
+    async def _start_browser_use(self, runtime: dict[str, Any], *, url: str) -> None:
+        existing = self._sessions.pop(runtime["id"], None)
+        if existing:
+            await existing.close()
+        old_pid = self._browser_pids.pop(runtime["id"], None)
+        if old_pid:
+            _terminate_process_tree(old_pid)
+        profile_path = Path(runtime["profile_path"])
+        profile_path.mkdir(parents=True, exist_ok=True)
+        self._remove_stale_profile_locks(profile_path)
+        extra_args = [
+            "--no-first-run",
+            "--no-default-browser-check",
+            "--window-size=1366,900",
+            "--window-position=0,0",
+            "--ozone-platform=x11",
+        ]
+        if self.chrome_executable:
+            stderr_path = Path("/tmp") / f"saas-chromium-{runtime['id']}.err"
+            stdout_path = Path("/tmp") / f"saas-chromium-{runtime['id']}.out"
+            launch_args = [
+                self.chrome_executable,
+                f"--remote-debugging-port={int(runtime['cdp_port'])}",
+                "--remote-debugging-address=127.0.0.1",
+                f"--user-data-dir={profile_path}",
+                "--no-sandbox",
+                "--disable-dev-shm-usage",
+                *extra_args,
+            ]
+            if self.browser_headless:
+                launch_args.extend(["--headless=new", "--disable-gpu"])
+            env = os.environ.copy()
+            if not self.browser_headless:
+                env.setdefault("DISPLAY", ":99")
+            logger.info(
+                "launching chromium for browser-use runtime",
+                extra={
+                    "tenant_id": runtime.get("tenant_id"),
+                    "platform_account_id": runtime.get("platform_account_id"),
+                    "runtime_id": runtime["id"],
+                    "cdp_port": runtime.get("cdp_port"),
+                    "profile_path": str(profile_path),
+                    "display": env.get("DISPLAY"),
+                    "stderr_path": str(stderr_path),
+                },
+            )
+            with stderr_path.open("ab") as stderr_file, stdout_path.open("ab") as stdout_file:
+                process = await asyncio.create_subprocess_exec(
+                    *launch_args,
+                    stdout=stdout_file,
+                    stderr=stderr_file,
+                    env=env,
+                )
+            self._browser_pids[runtime["id"]] = process.pid
+            if not await asyncio.to_thread(_wait_for_cdp, runtime["cdp_url"], timeout_seconds=10):
+                _terminate_process_tree(process.pid)
+                self._browser_pids.pop(runtime["id"], None)
+                stderr_tail = _tail_file(stderr_path, max_bytes=4000)
+                raise BrowserRuntimeError("cdp_start_timeout", f"Chromium started but CDP did not become reachable; stderr={stderr_tail}")
+            config = BrowserConfig(cdp_url=runtime["cdp_url"], headless=self.browser_headless)
+        else:
+            config = BrowserConfig(
+                chrome_remote_debugging_port=int(runtime["cdp_port"]),
+                extra_browser_args=extra_args,
+                headless=self.browser_headless,
+            )
+        browser = Browser(config=config)
+        playwright_browser = await browser.get_playwright_browser()
+        await self._restore_login_state_snapshot(runtime, playwright_browser)
+        if url:
+            page = await playwright_browser.new_page()
+            await page.goto(url, wait_until="domcontentloaded", timeout=15000)
+        self._sessions[runtime["id"]] = browser
+
+    def _close_session(self, runtime_id: str) -> None:
+        browser = self._sessions.pop(runtime_id, None)
+        if browser is not None:
+            self._run_async(browser.close())
+        pid = self._browser_pids.pop(runtime_id, None)
+        if pid:
+            _terminate_process_tree(pid)
+
+    def _run_async(self, awaitable: Awaitable[Any]) -> Any:
+        return self._browser_loop.run(awaitable)
+
+    def _remove_stale_profile_locks(self, profile_path: Path) -> None:
+        for directory in [profile_path, profile_path / "Default"]:
+            for lock_path in directory.glob("Singleton*"):
+                try:
+                    lock_path.unlink()
+                except (FileNotFoundError, PermissionError, OSError) as exc:
+                    logger.warning(
+                        "failed to remove stale chromium profile lock",
+                        extra={"profile_path": str(profile_path), "lock_path": str(lock_path), "error": type(exc).__name__},
+                    )
+
+    def _login_state_snapshot_path(self, runtime: dict[str, Any]) -> Path:
+        return Path(runtime["profile_path"]) / "saas_login_state.json"
+
+    async def _persist_login_state_snapshot(self, runtime: dict[str, Any]) -> dict[str, Any] | None:
+        path = self._login_state_snapshot_path(runtime)
+        try:
+            from playwright.async_api import async_playwright
+
+            async with async_playwright() as playwright:
+                browser = await playwright.chromium.connect_over_cdp(runtime["cdp_url"])
+                context = browser.contexts[0] if browser.contexts else await browser.new_context()
+                state = await context.storage_state()
+                path.parent.mkdir(parents=True, exist_ok=True)
+                tmp = path.with_suffix(".json.tmp")
+                tmp.write_text(json.dumps(state, ensure_ascii=False), encoding="utf-8")
+                try:
+                    tmp.chmod(0o600)
+                except OSError:
+                    pass
+                tmp.replace(path)
+            snapshot = {
+                "path": str(path),
+                "updated_at": utc_now().isoformat(),
+                "cookie_count": len(state.get("cookies") or []),
+                "origin_count": len(state.get("origins") or []),
+            }
+            logger.info(
+                "browser login state snapshot saved",
+                extra={
+                    "tenant_id": runtime.get("tenant_id"),
+                    "platform_account_id": runtime.get("platform_account_id"),
+                    "runtime_id": runtime.get("id"),
+                    "cookie_count": snapshot["cookie_count"],
+                    "origin_count": snapshot["origin_count"],
+                },
+            )
+            return snapshot
+        except Exception as exc:
+            logger.warning(
+                "browser login state snapshot failed",
+                extra={
+                    "tenant_id": runtime.get("tenant_id"),
+                    "platform_account_id": runtime.get("platform_account_id"),
+                    "runtime_id": runtime.get("id"),
+                    "error": type(exc).__name__,
+                },
+            )
+            return None
+
+    async def _restore_login_state_snapshot(self, runtime: dict[str, Any], playwright_browser: Any) -> None:
+        path = self._login_state_snapshot_path(runtime)
+        if not path.exists():
+            return
+        try:
+            state = json.loads(path.read_text(encoding="utf-8"))
+            cookies = state.get("cookies") or []
+            if not cookies:
+                return
+            context = playwright_browser.contexts[0] if playwright_browser.contexts else await playwright_browser.new_context()
+            await context.add_cookies(cookies)
+            logger.info(
+                "browser login state snapshot restored",
+                extra={
+                    "tenant_id": runtime.get("tenant_id"),
+                    "platform_account_id": runtime.get("platform_account_id"),
+                    "runtime_id": runtime.get("id"),
+                    "cookie_count": len(cookies),
+                },
+            )
+        except Exception as exc:
+            logger.warning(
+                "browser login state snapshot restore failed",
+                extra={
+                    "tenant_id": runtime.get("tenant_id"),
+                    "platform_account_id": runtime.get("platform_account_id"),
+                    "runtime_id": runtime.get("id"),
+                    "error": type(exc).__name__,
+                },
+            )
+
+
+class _BrowserUseRuntimeLoop:
+    def __init__(self) -> None:
+        self._loop = asyncio.new_event_loop()
+        self._thread = threading.Thread(target=self._run_forever, name="browser-use-runtime-loop", daemon=True)
+        self._thread.start()
+
+    def run(self, awaitable: Awaitable[Any]) -> Any:
+        future = asyncio.run_coroutine_threadsafe(awaitable, self._loop)
+        return future.result()
+
+    def _run_forever(self) -> None:
+        asyncio.set_event_loop(self._loop)
+        self._loop.run_forever()
 
 
 def safe_runtime(runtime: dict[str, Any]) -> dict[str, Any]:
@@ -303,6 +522,17 @@ def _wait_for_cdp(cdp_url: str, *, timeout_seconds: float) -> bool:
     return False
 
 
+def _tail_file(path: Path, *, max_bytes: int) -> str:
+    try:
+        with path.open("rb") as file:
+            file.seek(0, os.SEEK_END)
+            size = file.tell()
+            file.seek(max(0, size - max_bytes), os.SEEK_SET)
+            return file.read().decode("utf-8", errors="replace").strip()
+    except OSError:
+        return ""
+
+
 def _port_free(port: int) -> bool:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
         sock.settimeout(0.2)
@@ -312,13 +542,12 @@ def _port_free(port: int) -> bool:
 def _find_chrome() -> str | None:
     candidates = [
         os.getenv("CHROME_PATH"),
-        r"C:\Program Files\Google\Chrome\Application\chrome.exe",
-        r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
         shutil.which("chrome"),
-        shutil.which("chrome.exe"),
-        shutil.which("msedge"),
-        shutil.which("msedge.exe"),
+        shutil.which("chromium"),
+        shutil.which("chromium-browser"),
+        shutil.which("google-chrome"),
     ]
+    candidates.extend(str(path) for path in Path("/ms-browsers").glob("chromium-*/chrome-linux64/chrome"))
     for candidate in candidates:
         if candidate and Path(candidate).exists():
             return candidate
@@ -328,9 +557,6 @@ def _find_chrome() -> str | None:
 def _pid_exists(pid: int) -> bool:
     if pid <= 0:
         return False
-    if os.name == "nt":
-        result = subprocess.run(["tasklist", "/FI", f"PID eq {pid}", "/FO", "CSV"], capture_output=True)
-        return str(pid).encode("ascii") in (result.stdout or b"")
     try:
         os.kill(pid, 0)
         return True
@@ -339,13 +565,10 @@ def _pid_exists(pid: int) -> bool:
 
 
 def _terminate_process_tree(pid: int) -> None:
-    if os.name == "nt":
-        subprocess.run(["taskkill", "/PID", str(pid), "/T", "/F"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    else:
-        try:
-            os.kill(pid, 15)
-            time.sleep(1)
-            if _pid_exists(pid):
-                os.kill(pid, 9)
-        except OSError:
-            pass
+    try:
+        os.kill(pid, 15)
+        time.sleep(1)
+        if _pid_exists(pid):
+            os.kill(pid, 9)
+    except OSError:
+        pass

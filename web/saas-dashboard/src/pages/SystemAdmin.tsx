@@ -1,6 +1,6 @@
 import { useState } from 'react'
-import { Shield, Users, Settings, Flag, Server, Activity, CheckCircle, XCircle, AlertTriangle, MoreHorizontal } from 'lucide-react'
-import TopBar from '../components/layout/TopBar'
+import { Shield, Users, Server, CheckCircle, AlertTriangle } from 'lucide-react'
+
 import StatusBadge from '../components/ui/StatusBadge'
 import ConfirmModal from '../components/ui/ConfirmModal'
 
@@ -34,8 +34,7 @@ export default function SystemAdmin({ onMenuOpen }: { onMenuOpen?: () => void })
   const [suspendId, setSuspendId] = useState<string | null>(null)
 
   return (
-    <div className="flex flex-col min-h-screen">
-      <TopBar breadcrumbs={['系统', '系统管理']} pageTitle="系统管理" onMenuOpen={onMenuOpen} />
+    <div className="flex min-h-full flex-col">
       <div className="flex-1 p-4 md:p-6 flex flex-col gap-4">
         <div className="flex items-center gap-2">
           <Shield size={20} style={{ color: 'var(--primary)' }} />

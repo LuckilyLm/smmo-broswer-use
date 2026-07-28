@@ -27,12 +27,12 @@ export default function MetricCard({
 
   return (
     <div
-      className="bg-white border rounded-xl p-4 flex flex-col gap-2 relative group"
+      className="group relative flex min-h-24 min-w-0 flex-col gap-2 rounded-xl border bg-card p-4"
       style={{ borderColor: 'var(--border)' }}
       title={tooltip}
     >
       <div className="flex items-start justify-between gap-2">
-        <div className="text-[13px] text-gray-500 font-medium leading-tight">{label}</div>
+        <div className="min-w-0 break-words text-[13px] font-medium leading-snug text-muted-foreground">{label}</div>
         {icon && (
           <div className="rounded-lg p-1.5 shrink-0" style={{ background: color.bg }}>
             <span style={{ color: color.icon }}>{icon}</span>
@@ -40,7 +40,7 @@ export default function MetricCard({
         )}
       </div>
       <div className="flex items-end gap-3">
-        <div className="text-2xl font-bold text-gray-900 leading-none">{value}</div>
+        <div className="whitespace-nowrap text-2xl font-bold leading-none text-foreground">{value}</div>
         {sparkline && sparkline.length > 1 && (
           <svg width={48} height={24} className="mb-0.5">
             <polyline

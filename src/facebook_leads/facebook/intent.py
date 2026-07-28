@@ -27,6 +27,9 @@ def normalize_comment_text(text: str | None) -> str:
 
 
 class LeadIntentClassifier:
+    def __init__(self, custom_positive_keywords: list[str] | tuple[str, ...] | None = None) -> None:
+        self.custom_positive_keywords = tuple(str(item).strip() for item in (custom_positive_keywords or []) if str(item).strip())
+
     def classify_comment(
         self,
         comment: FacebookComment,
@@ -130,6 +133,23 @@ class LeadIntentClassifier:
                             matched_text=keyword,
                         )
                     )
+        for keyword in self.custom_positive_keywords:
+            normalized_keyword = normalize_comment_text(keyword)
+            if not normalized_keyword or ("CONTACT", normalized_keyword) in seen:
+                continue
+            if not _phrase_matches(normalized_text, normalized_keyword):
+                continue
+            seen.add(("CONTACT", normalized_keyword))
+            matches.append(
+                IntentMatch(
+                    keyword=keyword,
+                    normalized_keyword=normalized_keyword,
+                    category="CONTACT",
+                    language="custom",
+                    weight=CATEGORY_WEIGHTS["CONTACT"],
+                    matched_text=keyword,
+                )
+            )
         return matches
 
     def _false_positive(self, normalized_text: str, matches: list[IntentMatch]) -> tuple[bool, str | None]:

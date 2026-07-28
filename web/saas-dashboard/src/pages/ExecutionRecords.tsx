@@ -1,240 +1,341 @@
-import { useState } from 'react'
-import { Search, RefreshCw, X, CheckCircle, AlertTriangle, FileText } from 'lucide-react'
-import TopBar from '../components/layout/TopBar'
+import { useMemo, useState } from 'react'
+import { AlertTriangle, CheckCircle, Clock, Download, ExternalLink, FileText, RefreshCw, Search, X } from 'lucide-react'
+
+import { useExecution, useExecutionArtifacts, useExecutionKeywords, useExecutionLogs, useExecutions, type Execution, type ExecutionArtifact } from '../api/executions'
 import StatusBadge from '../components/ui/StatusBadge'
+import { Button } from '../components/ui/button'
+import { Skeleton } from '../components/ui/skeleton'
 
-const executions = [
-  { id: 'EX-2847', campaign: '跨境电商引流', trigger: '定时', status: '已完成', stage: '—', keywords: 5, scanned: 284, candidates: 19, leads: 19, duration: '2m 31s', started: '07/24 10:05' },
-  { id: 'EX-2846', campaign: '独立站获客', trigger: '定时', status: '已完成', stage: '—', keywords: 3, scanned: 201, candidates: 14, leads: 14, duration: '1m 58s', started: '07/24 09:48' },
-  { id: 'EX-2845', campaign: 'TikTok 品牌曝光', trigger: '手动', status: '执行中', stage: '评论扫描', keywords: 4, scanned: 143, candidates: 9, leads: 9, duration: '—', started: '07/24 10:12' },
-  { id: 'EX-2844', campaign: 'X 高净值用户', trigger: '定时', status: '异常', stage: '登录检查', keywords: 6, scanned: 0, candidates: 0, leads: 0, duration: '—', started: '07/23 22:00' },
-  { id: 'EX-2843', campaign: '海外招商合作', trigger: '定时', status: '已完成', stage: '—', keywords: 7, scanned: 156, candidates: 8, leads: 8, duration: '1m 44s', started: '07/23 18:30' },
-]
+function formatDateTime(value?: string | null) {
+  if (!value) return '—'
+  const date = new Date(value)
+  if (Number.isNaN(date.getTime())) return value
+  return date.toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' })
+}
 
-const timelineSteps = [
-  { label: '任务入队', status: 'done', time: '10:12:03' },
-  { label: 'Worker 认领', status: 'done', time: '10:12:04' },
-  { label: '运行时检查', status: 'done', time: '10:12:08' },
-  { label: '关键词搜索', status: 'done', time: '10:12:15' },
-  { label: '评论扫描', status: 'active', time: '进行中...' },
-  { label: '规则匹配', status: 'pending', time: '—' },
-  { label: '候选生成', status: 'pending', time: '—' },
-  { label: '完成', status: 'pending', time: '—' },
-]
+function formatDuration(ms?: number | null) {
+  if (!ms) return '—'
+  const seconds = Math.round(ms / 1000)
+  if (seconds < 60) return `${seconds}s`
+  return `${Math.floor(seconds / 60)}m ${seconds % 60}s`
+}
+
+function triggerLabel(value?: string) {
+  if (value === 'manual') return '手动'
+  if (value === 'scheduled') return '定时'
+  return value || '—'
+}
+
+function reportArtifact(artifacts: ExecutionArtifact[]) {
+  return artifacts.find((item) => item.name === 'execution_report.html')
+    || artifacts.find((item) => item.name === 'job_report.html')
+    || artifacts.find((item) => item.name.endsWith('.html'))
+}
+
+function openArtifact(item?: ExecutionArtifact) {
+  if (!item) return
+  window.open(item.url, '_blank', 'noopener,noreferrer')
+}
+
+function downloadArtifact(item?: ExecutionArtifact) {
+  if (!item) return
+  const separator = item.url.includes('?') ? '&' : '?'
+  window.open(`${item.url}${separator}download=1`, '_blank', 'noopener,noreferrer')
+}
 
 function ExecutionDrawer({ execId, onClose }: { execId: string; onClose: () => void }) {
-  const exec = executions.find((e) => e.id === execId)
-  if (!exec) return null
+  const { data: exec, isLoading: detailLoading } = useExecution(execId)
+  const { data: keywords = [] } = useExecutionKeywords(execId)
+  const { data: artifacts } = useExecutionArtifacts(execId)
+  const { data: logs } = useExecutionLogs(execId, 80)
+  const items = artifacts?.items || []
+  const report = reportArtifact(items)
+  const objectStorage = exec?.config_snapshot?.artifacts?.object_storage
 
   return (
-    <div className="fixed inset-0 md:inset-y-0 md:right-0 md:left-auto md:w-[520px] bg-white border-l flex flex-col z-40 shadow-xl" style={{ borderColor: 'var(--border)' }}>
-      <div className="flex items-center justify-between px-4 py-3 border-b shrink-0" style={{ borderColor: 'var(--border)' }}>
-        <div>
+    <div className="fixed inset-0 z-40 flex min-h-0 flex-col overflow-hidden border-l bg-white shadow-xl md:inset-y-0 md:left-auto md:right-0 md:w-[560px]" style={{ borderColor: 'var(--border)' }}>
+      <div className="flex shrink-0 items-center justify-between border-b px-4 py-3" style={{ borderColor: 'var(--border)' }}>
+        <div className="min-w-0">
           <h3 className="font-semibold text-gray-900">执行详情</h3>
-          <div className="text-xs text-gray-400 mt-0.5 font-mono">{exec.id} · {exec.campaign}</div>
+          <div className="mt-0.5 truncate font-mono text-xs text-gray-400">{execId}</div>
         </div>
-        <button className="text-gray-400 hover:text-gray-600 p-2" onClick={onClose} style={{ minHeight: 44, minWidth: 44 }}><X size={16} /></button>
+        <button className="p-2 text-gray-400 hover:text-gray-600" onClick={onClose} style={{ minHeight: 44, minWidth: 44 }}>
+          <X size={16} />
+        </button>
       </div>
-      <div className="flex-1 overflow-y-auto p-4 flex flex-col gap-5">
-        <div className="grid grid-cols-3 gap-3">
-          {[
-            { label: '扫描评论', value: exec.scanned },
-            { label: '候选线索', value: exec.candidates },
-            { label: '最终线索', value: exec.leads },
-          ].map((m) => (
-            <div key={m.label} className="bg-gray-50 border rounded-xl p-3 text-center" style={{ borderColor: 'var(--border)' }}>
-              <div className="text-xl font-bold text-gray-900">{m.value}</div>
-              <div className="text-[11px] text-gray-400 mt-0.5">{m.label}</div>
-            </div>
-          ))}
-        </div>
 
-        <div>
-          <div className="text-xs font-semibold text-gray-500 uppercase tracking-wider mb-3">执行时间线</div>
-          <div className="flex flex-col gap-0">
-            {timelineSteps.map((step, i) => (
-              <div key={i} className="flex gap-3">
-                <div className="flex flex-col items-center">
-                  <div
-                    className="w-5 h-5 rounded-full flex items-center justify-center shrink-0"
-                    style={{
-                      background: step.status === 'done' ? '#10b981' : step.status === 'active' ? 'var(--primary)' : '#e5e7eb',
-                    }}
-                  >
-                    {step.status === 'done' && <CheckCircle size={10} color="white" />}
-                    {step.status === 'active' && <div className="w-2 h-2 rounded-full bg-white animate-pulse" />}
-                    {step.status === 'pending' && <div className="w-1.5 h-1.5 rounded-full bg-gray-300" />}
-                  </div>
-                  {i < timelineSteps.length - 1 && (
-                    <div className="w-px my-1" style={{ height: 20, background: step.status === 'done' ? '#10b981' : '#e5e7eb' }} />
-                  )}
-                </div>
-                <div className="flex items-center justify-between flex-1 pb-3">
-                  <span className={`text-sm ${step.status === 'pending' ? 'text-gray-300' : 'text-gray-700'} font-medium`}>{step.label}</span>
-                  <span className={`text-xs ${step.status === 'done' ? 'text-gray-400' : step.status === 'active' ? 'text-indigo-500 font-medium' : 'text-gray-300'}`}>{step.time}</span>
-                </div>
+      {detailLoading || !exec ? (
+        <div className="flex flex-1 flex-col gap-3 p-4">
+          <Skeleton className="h-20 rounded-xl" />
+          <Skeleton className="h-40 rounded-xl" />
+          <Skeleton className="h-40 rounded-xl" />
+        </div>
+      ) : (
+        <div className="flex-1 overflow-y-auto p-4">
+          <div className="grid grid-cols-3 gap-3">
+            {[
+              { label: '扫描内容', value: exec.scanned_contents },
+              { label: '扫描评论', value: exec.scanned_comments },
+              { label: '候选线索', value: exec.lead_candidates },
+            ].map((m) => (
+              <div key={m.label} className="rounded-xl border bg-gray-50 p-3 text-center" style={{ borderColor: 'var(--border)' }}>
+                <div className="text-xl font-bold text-gray-900">{m.value}</div>
+                <div className="mt-0.5 text-[11px] text-gray-400">{m.label}</div>
               </div>
             ))}
           </div>
-        </div>
 
-        <div>
-          <div className="text-xs font-semibold text-gray-500 uppercase tracking-wider mb-2">执行日志</div>
-          <div className="overflow-x-auto">
-            <pre className="bg-gray-900 rounded-xl p-3 font-mono text-[11px] text-green-400 max-h-48 overflow-y-auto leading-relaxed min-w-0 whitespace-pre-wrap break-all">
-{`[10:12:03] 任务 ${exec.id} 已入队
-[10:12:04] Worker-3 认领任务
-[10:12:08] 运行时检查通过，浏览器实例就绪
-[10:12:15] 开始搜索关键词 (${exec.keywords} 个)
-[10:12:22] 关键词 "跨境电商" → 发现 48 个帖子
-[10:12:35] 关键词 "代购" → 发现 62 个帖子`}
-            </pre>
-          </div>
-        </div>
-
-        <div>
-          <div className="text-xs font-semibold text-gray-500 uppercase tracking-wider mb-2">产物</div>
-          <div className="flex gap-2 flex-wrap">
-            <button className="flex items-center gap-1.5 px-3 py-2.5 text-xs border rounded-lg hover:bg-gray-50" style={{ borderColor: 'var(--border)', minHeight: 44 }}>
-              <FileText size={11} /> 下载日志
-            </button>
-          </div>
-        </div>
-
-        {exec.status === '异常' && (
-          <div className="border rounded-xl p-4" style={{ background: '#fff1f2', borderColor: '#fca5a5' }}>
-            <div className="flex items-center gap-2 mb-2">
-              <AlertTriangle size={14} className="text-red-500" />
-              <span className="text-sm font-semibold text-red-700">执行异常</span>
+          <section className="mt-5 rounded-xl border bg-white p-4" style={{ borderColor: 'var(--border)' }}>
+            <div className="mb-3 flex items-center justify-between gap-2">
+              <div className="text-xs font-semibold uppercase tracking-wider text-gray-500">执行状态</div>
+              <StatusBadge status={exec.status} variant="dot" />
             </div>
-            <div className="text-xs text-red-600 mb-3">登录检查失败：账号 @smmo_x 会话已过期，需要重新登录。</div>
-            <button className="flex items-center gap-1.5 px-3 py-2.5 text-xs font-medium rounded-lg text-white hover:opacity-90" style={{ background: '#ef4444', minHeight: 44 }}>
-              <RefreshCw size={11} /> 重试
-            </button>
-          </div>
-        )}
-      </div>
+            <dl className="grid grid-cols-2 gap-3 text-sm">
+              <Info label="活动 ID" value={exec.campaign_id} mono />
+              <Info label="Run ID" value={exec.run_id || '—'} mono />
+              <Info label="触发方式" value={triggerLabel(exec.trigger_type)} />
+              <Info label="阶段" value={exec.stage || '—'} />
+              <Info label="开始时间" value={formatDateTime(exec.started_at)} />
+              <Info label="完成时间" value={formatDateTime(exec.finished_at)} />
+              <Info label="耗时" value={formatDuration(exec.elapsed_ms)} />
+              <Info label="Worker" value={exec.queue?.claimed_by || '—'} />
+            </dl>
+            {exec.error_type && (
+              <div className="mt-4 rounded-lg border border-red-200 bg-red-50 p-3 text-xs text-red-700">
+                <div className="mb-1 flex items-center gap-1.5 font-semibold"><AlertTriangle size={13} />执行异常</div>
+                <div>{exec.error_type}: {exec.error_message || '—'}</div>
+              </div>
+            )}
+          </section>
+
+          <section className="mt-5 rounded-xl border bg-white p-4" style={{ borderColor: 'var(--border)' }}>
+            <div className="mb-3 text-xs font-semibold uppercase tracking-wider text-gray-500">关键词执行</div>
+            {keywords.length === 0 ? (
+              <div className="text-sm text-gray-400">暂无关键词明细</div>
+            ) : (
+              <div className="overflow-x-auto">
+                <table className="w-full min-w-[520px] text-xs">
+                  <thead>
+                    <tr className="border-b bg-gray-50" style={{ borderColor: 'var(--border)' }}>
+                      {['关键词', '状态', '内容', '评论', '候选', '耗时'].map((heading) => <th key={heading} className="px-3 py-2 text-left font-medium text-gray-500">{heading}</th>)}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {keywords.map((item) => (
+                      <tr key={item.id} className="border-b last:border-0" style={{ borderColor: 'var(--border)' }}>
+                        <td className="px-3 py-2 font-medium">{item.keyword}</td>
+                        <td className="px-3 py-2"><StatusBadge status={item.status} variant="dot" /></td>
+                        <td className="px-3 py-2">{item.discovered_contents}</td>
+                        <td className="px-3 py-2">{item.scanned_comments}</td>
+                        <td className="px-3 py-2">{item.lead_candidates}</td>
+                        <td className="px-3 py-2 font-mono text-gray-500">{formatDuration(item.elapsed_ms)}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </section>
+
+          <section className="mt-5 rounded-xl border bg-white p-4" style={{ borderColor: 'var(--border)' }}>
+            <div className="mb-3 flex items-center justify-between gap-2">
+              <div>
+                <div className="text-xs font-semibold uppercase tracking-wider text-gray-500">报告和产物</div>
+                <div className="mt-1 text-xs text-gray-400">
+                  对象存储：{objectStorage?.enabled ? `已启用，上传 ${objectStorage.uploaded || 0} 个文件` : '未启用'}
+                  {objectStorage?.error ? `，错误：${objectStorage.error}` : ''}
+                </div>
+              </div>
+              <Button size="sm" variant="outline" disabled={!report} onClick={() => openArtifact(report)}>
+                <ExternalLink className="h-3.5 w-3.5" /> 打开报告
+              </Button>
+            </div>
+            {items.length === 0 ? (
+              <div className="text-sm text-gray-400">暂无产物</div>
+            ) : (
+              <div className="grid grid-cols-1 gap-2">
+                {items.map((item) => (
+                  <div key={`${item.url}-${item.name}`} className="flex items-center justify-between gap-3 rounded-lg border px-3 py-2 text-xs" style={{ borderColor: 'var(--border)', minHeight: 44 }}>
+                    <span className="flex min-w-0 items-center gap-2">
+                      <FileText size={13} className="shrink-0 text-gray-400" />
+                      <span className="truncate font-medium">{item.name}</span>
+                    </span>
+                    <span className="flex shrink-0 items-center gap-1">
+                      <span className="mr-1 hidden text-gray-400 sm:inline">{item.external_url ? '已同步对象存储' : '本地产物'}</span>
+                      <Button size="icon-sm" variant="ghost" title="预览" onClick={() => openArtifact(item)}>
+                        <ExternalLink className="h-3.5 w-3.5" />
+                      </Button>
+                      <Button size="icon-sm" variant="ghost" title="下载" onClick={() => downloadArtifact(item)}>
+                        <Download className="h-3.5 w-3.5" />
+                      </Button>
+                    </span>
+                  </div>
+                ))}
+              </div>
+            )}
+          </section>
+
+          <section className="mt-5 rounded-xl border bg-white p-4" style={{ borderColor: 'var(--border)' }}>
+            <div className="mb-3 text-xs font-semibold uppercase tracking-wider text-gray-500">执行日志</div>
+            {!logs?.items?.length ? (
+              <div className="text-sm text-gray-400">暂无日志</div>
+            ) : (
+              <div className="max-h-64 overflow-auto rounded-lg bg-gray-950 p-3 font-mono text-[11px] leading-relaxed text-gray-100">
+                {logs.items.map((item, index) => (
+                  <div key={`${item.source || 'log'}-${index}`} className="whitespace-pre-wrap break-words">
+                    <span className="text-gray-500">{String(item.line_number ?? index + 1).padStart(4, '0')} </span>{item.line}
+                  </div>
+                ))}
+              </div>
+            )}
+          </section>
+        </div>
+      )}
     </div>
   )
 }
 
-interface ExecutionRecordsProps {
-  onMenuOpen?: () => void
+function Info({ label, value, mono = false }: { label: string; value: string; mono?: boolean }) {
+  return (
+    <div className="min-w-0">
+      <dt className="text-xs text-gray-400">{label}</dt>
+      <dd className={`mt-1 truncate text-xs text-gray-800 ${mono ? 'font-mono' : ''}`}>{value}</dd>
+    </div>
+  )
 }
 
-export default function ExecutionRecords({ onMenuOpen }: ExecutionRecordsProps) {
+export default function ExecutionRecords() {
   const [search, setSearch] = useState('')
+  const [status, setStatus] = useState('')
   const [openDrawer, setOpenDrawer] = useState<string | null>(null)
+  const { data, isLoading, error, refetch, isFetching } = useExecutions({ status: status || undefined, limit: 50, offset: 0 })
+  const executions = data?.items || []
 
-  const filtered = executions.filter((e) =>
-    !search || e.campaign.includes(search) || e.id.includes(search)
-  )
+  const filtered = useMemo(() => executions.filter((item) => {
+    if (!search) return true
+    const text = `${item.id} ${item.campaign_id} ${item.run_id || ''} ${item.current_keyword || ''}`.toLowerCase()
+    return text.includes(search.toLowerCase())
+  }), [executions, search])
 
   return (
-    <div className="flex flex-col min-h-screen">
-      <TopBar breadcrumbs={['运营管理', '执行记录']} pageTitle="执行记录" onMenuOpen={onMenuOpen} />
-      <div className="flex-1 p-4 md:p-6 flex flex-col gap-4">
-        <div className="min-w-0">
-          <h1 className="text-xl font-semibold text-gray-900">执行记录</h1>
-          <p className="text-sm text-gray-500 mt-0.5 hidden md:block">查看所有营销活动的扫描和处理执行历史</p>
+    <div className="flex min-h-full flex-col">
+      <div className="flex flex-1 flex-col gap-4 p-4 md:p-6">
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div className="min-w-0">
+            <h1 className="text-xl font-semibold text-gray-900">执行记录</h1>
+            <p className="mt-0.5 hidden text-sm text-gray-500 md:block">查看后端 worker 的真实扫描、候选生成和报告产物</p>
+          </div>
+          <Button variant="outline" onClick={() => refetch()} disabled={isFetching}>
+            <RefreshCw className={`h-4 w-4 ${isFetching ? 'animate-spin' : ''}`} /> 刷新
+          </Button>
         </div>
 
-        <div className="flex items-center gap-2 flex-wrap">
-          <div className="relative flex-1 min-w-0" style={{ maxWidth: 240 }}>
+        <div className="flex flex-wrap items-center gap-2">
+          <div className="relative min-w-0 flex-1" style={{ maxWidth: 280 }}>
             <Search size={13} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-gray-400" />
             <input
               type="text"
-              placeholder="搜索执行记录..."
+              placeholder="搜索执行 ID / 关键词..."
               value={search}
-              onChange={(e) => setSearch(e.target.value)}
-              className="pl-8 pr-3 py-2.5 text-sm border rounded-lg bg-white focus:outline-none w-full"
+              onChange={(event) => setSearch(event.target.value)}
+              className="w-full rounded-lg border bg-white py-2.5 pl-8 pr-3 text-sm focus:outline-none"
               style={{ borderColor: 'var(--border)', minHeight: 44 }}
             />
           </div>
-          <select className="px-3 py-2.5 text-sm border rounded-lg bg-white focus:outline-none" style={{ borderColor: 'var(--border)', minHeight: 44 }}>
-            {['全部状态', '已完成', '执行中', '异常'].map((v) => <option key={v}>{v}</option>)}
+          <select value={status} onChange={(event) => setStatus(event.target.value)} className="rounded-lg border bg-white px-3 py-2.5 text-sm focus:outline-none" style={{ borderColor: 'var(--border)', minHeight: 44 }}>
+            <option value="">全部状态</option>
+            <option value="running">执行中</option>
+            <option value="completed">已完成</option>
+            <option value="partial">部分完成</option>
+            <option value="failed">失败</option>
+            <option value="cancelled">已取消</option>
           </select>
+          <span className="ml-auto shrink-0 text-xs text-gray-400">{filtered.length} 条记录</span>
         </div>
 
-        {/* Desktop table */}
-        <div className="hidden md:block bg-white border rounded-xl overflow-hidden" style={{ borderColor: 'var(--border)' }}>
-          <div className="overflow-x-auto">
-            <table className="w-full text-sm min-w-[820px]">
-              <thead>
-                <tr className="border-b" style={{ borderColor: 'var(--border)', background: '#fafafa' }}>
-                  {['执行 ID', '活动', '触发', '状态', '阶段', '关键词', '扫描', '候选', '线索', '耗时', '开始时间', '操作'].map((h) => (
-                    <th key={h} className="text-left px-3 py-3 text-xs font-semibold text-gray-500">{h}</th>
-                  ))}
-                </tr>
-              </thead>
-              <tbody>
-                {filtered.map((e) => (
-                  <tr key={e.id} className="border-b last:border-0 hover:bg-gray-50 cursor-pointer" style={{ borderColor: 'var(--border)' }} onClick={() => setOpenDrawer(e.id)}>
-                    <td className="px-3 py-3 font-mono text-xs text-gray-600">{e.id}</td>
-                    <td className="px-3 py-3 font-medium text-gray-800 text-xs whitespace-nowrap">{e.campaign}</td>
-                    <td className="px-3 py-3 text-gray-500 text-xs">{e.trigger}</td>
-                    <td className="px-3 py-3"><StatusBadge status={e.status} variant="dot" /></td>
-                    <td className="px-3 py-3 text-gray-400 text-xs">{e.stage}</td>
-                    <td className="px-3 py-3 text-center text-gray-600 text-xs">{e.keywords}</td>
-                    <td className="px-3 py-3 text-center text-gray-600 text-xs">{e.scanned}</td>
-                    <td className="px-3 py-3 text-center text-gray-600 text-xs">{e.candidates}</td>
-                    <td className="px-3 py-3 text-center font-medium text-xs" style={{ color: e.leads > 0 ? '#10b981' : '#9ca3af' }}>{e.leads}</td>
-                    <td className="px-3 py-3 text-gray-500 text-xs font-mono">{e.duration}</td>
-                    <td className="px-3 py-3 text-gray-400 text-xs whitespace-nowrap">{e.started}</td>
-                    <td className="px-3 py-3">
-                      <button className="text-xs text-indigo-600 hover:underline" style={{ minHeight: 36 }}>详情</button>
-                    </td>
+        {error && <div className="rounded-lg border border-red-200 bg-red-50 p-3 text-sm text-red-700">执行记录加载失败，请刷新重试</div>}
+
+        <div className="hidden overflow-hidden rounded-xl border bg-white md:block" style={{ borderColor: 'var(--border)' }}>
+          {isLoading ? (
+            <div className="p-4"><Skeleton className="h-48 rounded-xl" /></div>
+          ) : (
+            <div className="overflow-x-auto">
+              <table className="w-full min-w-[980px] text-sm">
+                <thead>
+                  <tr className="border-b bg-gray-50" style={{ borderColor: 'var(--border)' }}>
+                    {['执行 ID', '活动', '触发', '状态', '阶段', '关键词', '内容', '评论', '候选', '耗时', '开始时间', '报告'].map((heading) => (
+                      <th key={heading} className="px-3 py-3 text-left text-xs font-semibold text-gray-500">{heading}</th>
+                    ))}
                   </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
+                </thead>
+                <tbody>
+                  {filtered.map((item) => (
+                    <tr key={item.id} className="cursor-pointer border-b last:border-0 hover:bg-gray-50" style={{ borderColor: 'var(--border)' }} onClick={() => setOpenDrawer(item.id)}>
+                      <td className="px-3 py-3 font-mono text-xs text-gray-600">{item.id}</td>
+                      <td className="px-3 py-3 text-xs text-gray-500">{item.campaign_id}</td>
+                      <td className="px-3 py-3 text-xs text-gray-500">{triggerLabel(item.trigger_type)}</td>
+                      <td className="px-3 py-3"><StatusBadge status={item.status} variant="dot" /></td>
+                      <td className="px-3 py-3 text-xs text-gray-400">{item.stage || '—'}</td>
+                      <td className="px-3 py-3 text-center text-xs text-gray-600">{item.total_keywords}</td>
+                      <td className="px-3 py-3 text-center text-xs text-gray-600">{item.scanned_contents}</td>
+                      <td className="px-3 py-3 text-center text-xs text-gray-600">{item.scanned_comments}</td>
+                      <td className="px-3 py-3 text-center text-xs font-medium text-gray-800">{item.lead_candidates}</td>
+                      <td className="px-3 py-3 font-mono text-xs text-gray-500">{formatDuration(item.elapsed_ms)}</td>
+                      <td className="px-3 py-3 text-xs text-gray-400">{formatDateTime(item.started_at || item.created_at)}</td>
+                      <td className="px-3 py-3">
+                        {item.config_snapshot?.artifacts ? (
+                          <span className="inline-flex items-center gap-1 text-xs text-emerald-700"><CheckCircle size={12} /> 已生成</span>
+                        ) : item.status === 'completed' || item.status === 'partial' ? (
+                          <span className="inline-flex items-center gap-1 text-xs text-amber-600"><Clock size={12} /> 生成中</span>
+                        ) : (
+                          <span className="text-xs text-gray-300">—</span>
+                        )}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+              {filtered.length === 0 && <div className="p-8 text-center text-sm text-gray-400">暂无执行记录</div>}
+            </div>
+          )}
         </div>
 
-        {/* Mobile cards */}
-        <div className="md:hidden flex flex-col gap-3">
-          {filtered.map((e) => (
-            <div
-              key={e.id}
-              className="bg-white border rounded-xl p-4 cursor-pointer active:bg-gray-50"
-              style={{ borderColor: e.status === '异常' ? '#fca5a5' : 'var(--border)' }}
-              onClick={() => setOpenDrawer(e.id)}
-            >
-              <div className="flex items-start justify-between gap-2 mb-2">
+        <div className="flex flex-col gap-3 md:hidden">
+          {filtered.map((item) => (
+            <button key={item.id} className="rounded-xl border bg-white p-4 text-left active:bg-gray-50" style={{ borderColor: item.status === 'failed' ? '#fca5a5' : 'var(--border)' }} onClick={() => setOpenDrawer(item.id)}>
+              <div className="mb-2 flex items-start justify-between gap-2">
                 <div className="min-w-0">
-                  <div className="font-medium text-sm text-gray-800 truncate">{e.campaign}</div>
-                  <div className="text-xs text-gray-400 font-mono">{e.id} · {e.trigger} · {e.started}</div>
+                  <div className="truncate font-mono text-xs text-gray-800">{item.id}</div>
+                  <div className="mt-0.5 text-xs text-gray-400">{triggerLabel(item.trigger_type)} · {formatDateTime(item.started_at || item.created_at)}</div>
                 </div>
-                <StatusBadge status={e.status} variant="dot" />
+                <StatusBadge status={item.status} variant="dot" />
               </div>
-              <div className="grid grid-cols-3 gap-2 mt-2">
-                {[
-                  { label: '扫描', value: e.scanned },
-                  { label: '候选', value: e.candidates },
-                  { label: '线索', value: e.leads },
-                ].map(({ label, value }) => (
-                  <div key={label} className="text-center">
-                    <div className="text-sm font-semibold text-gray-800">{value}</div>
-                    <div className="text-[11px] text-gray-400">{label}</div>
-                  </div>
-                ))}
+              <div className="grid grid-cols-3 gap-2">
+                <Metric label="评论" value={item.scanned_comments} />
+                <Metric label="候选" value={item.lead_candidates} />
+                <Metric label="耗时" value={formatDuration(item.elapsed_ms)} />
               </div>
-              {e.status === '异常' && (
-                <div className="mt-2 text-xs text-red-500 flex items-center gap-1">
-                  <AlertTriangle size={11} /> 登录检查失败，需要重新登录
-                </div>
-              )}
-            </div>
+              {item.error_type && <div className="mt-2 flex items-center gap-1 text-xs text-red-500"><AlertTriangle size={11} /> {item.error_type}</div>}
+            </button>
           ))}
         </div>
       </div>
 
       {openDrawer && (
         <>
-          <div className="fixed inset-0 bg-black/20 z-30" onClick={() => setOpenDrawer(null)} />
+          <div className="fixed inset-0 z-30 bg-black/20" onClick={() => setOpenDrawer(null)} />
           <ExecutionDrawer execId={openDrawer} onClose={() => setOpenDrawer(null)} />
         </>
       )}
+    </div>
+  )
+}
+
+function Metric({ label, value }: { label: string; value: number | string }) {
+  return (
+    <div className="text-center">
+      <div className="text-sm font-semibold text-gray-800">{value}</div>
+      <div className="text-[11px] text-gray-400">{label}</div>
     </div>
   )
 }

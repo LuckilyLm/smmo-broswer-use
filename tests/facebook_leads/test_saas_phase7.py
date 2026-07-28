@@ -69,7 +69,7 @@ class FakeRuntimeRegistry:
             {
                 "tenant_id": context.tenant_id,
                 "platform_account_id": account_id,
-                "runtime_type": "local_chrome_cdp",
+                "runtime_type": "browser_use_chromium_cdp",
                 "status": "running",
                 "profile_path": str(self.tmp_path / context.tenant_id / account_id / "profile"),
                 "cdp_port": self.next_port,

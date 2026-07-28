@@ -1,270 +1,258 @@
-import { useState } from 'react'
+import { useNavigate, useLocation } from "react-router-dom";
 import {
   LayoutDashboard, Users, Megaphone, Tag, Inbox,
   FileText, GitBranch, CheckSquare, Clock,
   Activity, Zap, UserCheck, ScrollText,
-  Bell, Settings, Shield, ChevronLeft, ChevronRight,
-  ChevronDown, Building2, X
-} from 'lucide-react'
+  Bell, Settings, Shield, LogOut
+} from "lucide-react";
+import { useAuth } from "../../auth/AuthProvider";
+import { Button } from "@/components/ui/button";
+import { Avatar, AvatarFallback } from "@/components/ui/avatar";
+import { Badge } from "@/components/ui/badge";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
+import { Sheet, SheetContent } from "@/components/ui/sheet";
 
 interface NavItem {
-  id: string
-  label: string
-  icon: React.ReactNode
-  badge?: number
+  id: string;
+  label: string;
+  icon: React.ReactNode;
+  badge?: number;
+  adminOnly?: boolean;
 }
 
 interface NavGroup {
-  label: string
-  items: NavItem[]
+  label: string;
+  items: NavItem[];
 }
 
-const navGroups: NavGroup[] = [
-  {
-    label: 'Overview',
-    items: [
-      { id: 'dashboard', label: '仪表盘', icon: <LayoutDashboard size={16} /> },
-    ],
-  },
-  {
-    label: '获客管理',
-    items: [
-      { id: 'platform-accounts', label: '平台账号', icon: <Users size={16} /> },
-      { id: 'campaigns', label: '营销活动', icon: <Megaphone size={16} /> },
-      { id: 'keywords', label: '关键词', icon: <Tag size={16} /> },
-      { id: 'leads-inbox', label: '线索收件箱', icon: <Inbox size={16} />, badge: 21 },
-    ],
-  },
-  {
-    label: '回复自动化',
-    items: [
-      { id: 'reply-templates', label: '回复模板', icon: <FileText size={16} /> },
-      { id: 'matching-rules', label: '匹配规则', icon: <GitBranch size={16} /> },
-      { id: 'reply-tasks', label: '回复任务', icon: <CheckSquare size={16} />, badge: 14 },
-      { id: 'reply-records', label: '回复记录', icon: <Clock size={16} /> },
-    ],
-  },
-  {
-    label: '运营管理',
-    items: [
-      { id: 'execution-records', label: '执行记录', icon: <Activity size={16} /> },
-      { id: 'token-usage', label: 'Token 用量', icon: <Zap size={16} /> },
-    ],
-  },
-  {
-    label: '组织管理',
-    items: [
-      { id: 'members', label: '成员管理', icon: <UserCheck size={16} /> },
-      { id: 'audit-log', label: '审计日志', icon: <ScrollText size={16} /> },
-      { id: 'notifications', label: '通知中心', icon: <Bell size={16} />, badge: 3 },
-    ],
-  },
-  {
-    label: '系统',
-    items: [
-      { id: 'settings', label: '设置', icon: <Settings size={16} /> },
-      { id: 'system-admin', label: '系统管理', icon: <Shield size={16} /> },
-    ],
-  },
-]
+function getNavGroups(isSystemAdmin?: boolean): NavGroup[] {
+  const groups: NavGroup[] = [
+    {
+      label: "概览",
+      items: [
+        { id: "dashboard", label: "仪表盘", icon: <LayoutDashboard className="h-4 w-4" /> },
+      ],
+    },
+    {
+      label: "获客管理",
+      items: [
+        { id: "platform-accounts", label: "平台账号", icon: <Users className="h-4 w-4" /> },
+        { id: "campaigns", label: "营销活动", icon: <Megaphone className="h-4 w-4" /> },
+        { id: "keywords", label: "关键词", icon: <Tag className="h-4 w-4" /> },
+        { id: "leads-inbox", label: "线索收件箱", icon: <Inbox className="h-4 w-4" /> },
+      ],
+    },
+    {
+      label: "回复自动化",
+      items: [
+        { id: "reply-templates", label: "回复模板", icon: <FileText className="h-4 w-4" /> },
+        { id: "matching-rules", label: "匹配规则", icon: <GitBranch className="h-4 w-4" /> },
+        { id: "reply-tasks", label: "回复任务", icon: <CheckSquare className="h-4 w-4" /> },
+        { id: "reply-records", label: "回复记录", icon: <Clock className="h-4 w-4" /> },
+      ],
+    },
+    {
+      label: "运营管理",
+      items: [
+        { id: "execution-records", label: "执行记录", icon: <Activity className="h-4 w-4" /> },
+        { id: "token-usage", label: "Token 用量", icon: <Zap className="h-4 w-4" /> },
+      ],
+    },
+    {
+      label: "组织管理",
+      items: [
+        { id: "members", label: "成员管理", icon: <UserCheck className="h-4 w-4" /> },
+        { id: "audit-logs", label: "审计日志", icon: <ScrollText className="h-4 w-4" /> },
+        { id: "notifications", label: "通知中心", icon: <Bell className="h-4 w-4" /> },
+      ],
+    },
+  ];
+
+  if (isSystemAdmin) {
+    groups.push({
+      label: "系统",
+      items: [
+        { id: "settings", label: "设置", icon: <Settings className="h-4 w-4" /> },
+        { id: "system-admin", label: "系统管理", icon: <Shield className="h-4 w-4" />, adminOnly: true },
+      ],
+    });
+  } else {
+    groups.push({
+      label: "系统",
+      items: [
+        { id: "settings", label: "设置", icon: <Settings className="h-4 w-4" /> },
+      ],
+    });
+  }
+
+  return groups;
+}
 
 interface SidebarProps {
-  activePage: string
-  onNavigate: (page: string) => void
-  mobileOpen?: boolean
-  onMobileClose?: () => void
+  mobileOpen?: boolean;
+  onMobileClose?: () => void;
 }
 
-function SidebarInner({
-  activePage, onNavigate, collapsed, setCollapsed,
-}: {
-  activePage: string
-  onNavigate: (page: string) => void
-  collapsed: boolean
-  setCollapsed: (v: boolean) => void
-}) {
-  const [workspace, setWorkspace] = useState('科技有限公司')
-  const [wsOpen, setWsOpen] = useState(false)
-  const workspaces = ['科技有限公司', '贸易集团', '营销中心']
+function NavContent({ activePage, onNavigate, collapsed }: { activePage: string; onNavigate: (page: string) => void; collapsed?: boolean }) {
+  const { isSystemAdmin } = useAuth();
+  const navGroups = getNavGroups(isSystemAdmin);
 
   return (
-    <>
-      {/* Logo + workspace */}
-      <div className="flex items-center gap-2 px-3 py-3 border-b shrink-0" style={{ borderColor: 'var(--border)' }}>
-        <div
-          className="flex items-center justify-center rounded-lg shrink-0"
-          style={{ width: 32, height: 32, background: 'var(--primary)' }}
-        >
-          <span className="text-white font-bold text-xs">SM</span>
-        </div>
-        {!collapsed && (
-          <div className="flex-1 min-w-0 relative">
-            <button
-              className="flex items-center gap-1 w-full text-left"
-              onClick={() => setWsOpen(!wsOpen)}
-            >
-              <span className="text-sm font-semibold truncate text-gray-900">{workspace}</span>
-              <ChevronDown size={12} className="shrink-0 text-gray-400" />
-            </button>
-            {wsOpen && (
-              <div
-                className="absolute top-full left-0 mt-1 w-44 bg-white border rounded-lg shadow-lg z-50 py-1"
-                style={{ borderColor: 'var(--border)' }}
+    <nav className="flex flex-col gap-1 p-2">
+      {navGroups.map((group) => (
+        <div key={group.label} className="mb-2">
+          {!collapsed && (
+            <div className="px-3 py-1.5 text-xs font-medium text-muted-foreground uppercase tracking-wider">
+              {group.label}
+            </div>
+          )}
+          {group.items.map((item) => {
+            const isActive = activePage === item.id;
+            return (
+              <Button
+                key={item.id}
+                variant={isActive ? "secondary" : "ghost"}
+                className={collapsed ? "w-full justify-center h-9 px-0" : "w-full justify-start gap-2 h-9 text-sm"}
+                title={collapsed ? item.label : undefined}
+                onClick={() => onNavigate(item.id)}
               >
-                {workspaces.map((ws) => (
-                  <button
-                    key={ws}
-                    className="w-full text-left px-3 py-2 text-sm hover:bg-gray-50 flex items-center gap-2"
-                    onClick={() => { setWorkspace(ws); setWsOpen(false) }}
-                  >
-                    <Building2 size={13} className="text-gray-400" />
-                    <span className="truncate">{ws}</span>
-                    {ws === workspace && <span className="ml-auto w-1.5 h-1.5 rounded-full bg-indigo-600 shrink-0" />}
-                  </button>
-                ))}
-              </div>
-            )}
-          </div>
-        )}
-        <button
-          className="ml-auto flex items-center justify-center rounded hover:bg-gray-100 text-gray-400 shrink-0 hidden md:flex"
-          style={{ width: 24, height: 24 }}
-          onClick={() => setCollapsed(!collapsed)}
-        >
-          {collapsed ? <ChevronRight size={14} /> : <ChevronLeft size={14} />}
-        </button>
-      </div>
-
-      {/* Nav */}
-      <nav className="flex-1 overflow-y-auto py-2 scrollbar-hide">
-        {navGroups.map((group) => (
-          <div key={group.label} className="mb-1">
-            {!collapsed && (
-              <div className="px-3 py-1 text-[11px] font-semibold tracking-wider text-gray-400 uppercase">
-                {group.label}
-              </div>
-            )}
-            {group.items.map((item) => {
-              const isActive = activePage === item.id
-              return (
-                <button
-                  key={item.id}
-                  onClick={() => onNavigate(item.id)}
-                  title={collapsed ? item.label : undefined}
-                  className="w-full flex items-center gap-2.5 px-3 rounded-md mx-1 transition-colors"
-                  style={{
-                    width: 'calc(100% - 8px)',
-                    color: isActive ? 'var(--primary)' : '#374151',
-                    background: isActive ? 'var(--accent)' : 'transparent',
-                    fontWeight: isActive ? 600 : 400,
-                    minHeight: 36,
-                    paddingTop: 6,
-                    paddingBottom: 6,
-                  }}
-                  onMouseEnter={(e) => { if (!isActive) e.currentTarget.style.background = '#f9fafb' }}
-                  onMouseLeave={(e) => { if (!isActive) e.currentTarget.style.background = 'transparent' }}
-                >
-                  <span className="shrink-0" style={{ color: isActive ? 'var(--primary)' : '#9ca3af' }}>
-                    {item.icon}
-                  </span>
-                  {!collapsed && (
-                    <>
-                      <span className="flex-1 text-left truncate text-sm">{item.label}</span>
-                      {item.badge !== undefined && (
-                        <span
-                          className="text-[11px] font-medium px-1.5 py-0.5 rounded-full shrink-0"
-                          style={{ background: isActive ? 'var(--primary)' : '#e5e7eb', color: isActive ? '#fff' : '#374151' }}
-                        >
-                          {item.badge}
-                        </span>
-                      )}
-                    </>
-                  )}
-                </button>
-              )
-            })}
-            {!collapsed && <div className="my-1 mx-3 border-t" style={{ borderColor: 'var(--border)' }} />}
-          </div>
-        ))}
-      </nav>
-
-      {/* Bottom user */}
-      {!collapsed && (
-        <div className="border-t p-3 shrink-0" style={{ borderColor: 'var(--border)' }}>
-          <div className="flex items-center gap-2">
-            <div
-              className="rounded-full flex items-center justify-center text-white text-xs font-semibold shrink-0"
-              style={{ width: 28, height: 28, background: 'var(--primary)' }}
-            >
-              王
-            </div>
-            <div className="flex-1 min-w-0">
-              <div className="text-sm font-medium text-gray-800 truncate">王小明</div>
-              <div className="text-[11px] text-gray-400 truncate">管理员</div>
-            </div>
-          </div>
+                <span className={isActive ? "text-primary" : "text-muted-foreground"}>
+                  {item.icon}
+                </span>
+                {!collapsed && <span className="flex-1 text-left">{item.label}</span>}
+                {!collapsed && item.badge !== undefined && item.badge > 0 && (
+                  <Badge variant={isActive ? "default" : "secondary"} className="h-5 min-w-5 px-1 text-xs">
+                    {item.badge}
+                  </Badge>
+                )}
+              </Button>
+            );
+          })}
         </div>
-      )}
-    </>
-  )
+      ))}
+    </nav>
+  );
 }
 
-export default function Sidebar({ activePage, onNavigate, mobileOpen, onMobileClose }: SidebarProps) {
-  const [collapsed, setCollapsed] = useState(false)
+function UserMenu({ collapsed }: { collapsed?: boolean }) {
+  const { user, role, logout } = useAuth();
+  const navigate = useNavigate();
 
-  const handleNavigate = (page: string) => {
-    onNavigate(page)
-    onMobileClose?.()
+  const handleLogout = async () => {
+    await logout();
+    navigate("/login");
+  };
+
+  const roleText = role === "owner" ? "所有者" : role === "admin" ? "管理员" : role === "member" ? "成员" : "访客";
+  const userInitial = user?.display_name?.[0] || user?.email?.[0] || "?";
+
+  if (collapsed) {
+    return (
+      <DropdownMenu>
+        <DropdownMenuTrigger>
+          <Button variant="ghost" size="icon" className="h-8 w-8 rounded-full" title={user?.display_name || user?.email || "用户"}>
+            <Avatar className="h-8 w-8">
+              <AvatarFallback className="bg-primary text-primary-foreground text-xs font-medium">
+                {userInitial}
+              </AvatarFallback>
+            </Avatar>
+          </Button>
+        </DropdownMenuTrigger>
+        <DropdownMenuContent align="end" className="w-48">
+          <div className="px-2 py-1.5 text-sm font-medium">{user?.display_name || user?.email || "用户"}</div>
+          <div className="px-2 pb-2 text-xs text-muted-foreground">{roleText}</div>
+          <DropdownMenuSeparator />
+          <DropdownMenuItem onClick={() => navigate("/settings")}>
+            <Settings className="mr-2 h-4 w-4" />
+            设置
+          </DropdownMenuItem>
+          <DropdownMenuSeparator />
+          <DropdownMenuItem onClick={handleLogout} className="text-destructive focus:text-destructive">
+            <LogOut className="mr-2 h-4 w-4" />
+            退出登录
+          </DropdownMenuItem>
+        </DropdownMenuContent>
+      </DropdownMenu>
+    );
   }
 
   return (
+    <DropdownMenu>
+      <DropdownMenuTrigger>
+        <Button variant="ghost" className="w-full justify-start gap-2 px-2 h-auto py-2">
+          <Avatar className="h-8 w-8">
+            <AvatarFallback className="bg-primary text-primary-foreground text-xs font-medium">
+              {userInitial}
+            </AvatarFallback>
+          </Avatar>
+          <div className="flex-1 min-w-0 text-left">
+            <p className="text-sm font-medium truncate">{user?.display_name || user?.email || "用户"}</p>
+            <p className="text-xs text-muted-foreground truncate">{roleText}</p>
+          </div>
+        </Button>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent align="end" className="w-48">
+        <DropdownMenuItem onClick={() => navigate("/settings")}>
+          <Settings className="mr-2 h-4 w-4" />
+          设置
+        </DropdownMenuItem>
+        <DropdownMenuSeparator />
+        <DropdownMenuItem onClick={handleLogout} className="text-destructive focus:text-destructive">
+          <LogOut className="mr-2 h-4 w-4" />
+          退出登录
+        </DropdownMenuItem>
+      </DropdownMenuContent>
+    </DropdownMenu>
+  );
+}
+
+export default function Sidebar({ mobileOpen, onMobileClose }: SidebarProps) {
+  const navigate = useNavigate();
+  const location = useLocation();
+  const { tenant } = useAuth();
+  const activePage = location.pathname.split("/")[1] || "dashboard";
+
+  const handleNavigate = (page: string) => {
+    navigate(`/${page}`);
+    onMobileClose?.();
+  };
+
+  return (
     <>
-      {/* Desktop sidebar */}
-      <aside
-        className="hidden md:flex flex-col border-r bg-white shrink-0 transition-all duration-200"
-        style={{
-          width: collapsed ? 56 : 220,
-          borderColor: 'var(--border)',
-          height: '100vh',
-          position: 'sticky',
-          top: 0,
-        }}
-      >
-        <SidebarInner
-          activePage={activePage}
-          onNavigate={handleNavigate}
-          collapsed={collapsed}
-          setCollapsed={setCollapsed}
-        />
+      {/* Desktop Sidebar */}
+      <aside data-testid="desktop-sidebar" className="hidden h-full min-h-0 w-[220px] shrink-0 flex-col overflow-hidden border-r bg-sidebar md:flex">
+        <div data-testid="sidebar-nav-scroll" data-scroll-region className="min-h-0 flex-1 overflow-y-auto overscroll-contain">
+          <NavContent activePage={activePage} onNavigate={handleNavigate} collapsed={false} />
+        </div>
+
+        <div data-testid="sidebar-footer" className="shrink-0 border-t bg-sidebar p-2">
+          <UserMenu />
+        </div>
       </aside>
 
-      {/* Mobile drawer overlay */}
-      {mobileOpen && (
-        <div className="md:hidden fixed inset-0 z-50 flex">
-          <div
-            className="absolute inset-0 bg-black/40"
-            onClick={onMobileClose}
-          />
-          <aside
-            className="relative flex flex-col bg-white shadow-xl"
-            style={{ width: 260, height: '100%' }}
-          >
-            <button
-              className="absolute top-3 right-3 p-2 rounded-lg hover:bg-gray-100 text-gray-400 z-10"
-              onClick={onMobileClose}
-              style={{ minHeight: 44, minWidth: 44 }}
-            >
-              <X size={18} />
-            </button>
-            <SidebarInner
-              activePage={activePage}
-              onNavigate={handleNavigate}
-              collapsed={false}
-              setCollapsed={() => {}}
-            />
-          </aside>
-        </div>
-      )}
+      {/* Mobile Drawer */}
+      <Sheet open={mobileOpen} onOpenChange={onMobileClose}>
+        <SheetContent side="left" className="h-dvh max-h-dvh w-60 min-h-0 gap-0 overflow-hidden p-0 pb-[env(safe-area-inset-bottom)]">
+          <div data-testid="mobile-sidebar-header" className="flex shrink-0 items-center gap-2 border-b p-3">
+            <div className="h-8 w-8 rounded-lg bg-primary flex items-center justify-center">
+              <span className="text-primary-foreground font-bold text-sm">SM</span>
+            </div>
+            <span className="font-medium truncate">{tenant?.name}</span>
+          </div>
+          <div data-testid="mobile-sidebar-nav-scroll" data-scroll-region className="min-h-0 flex-1 overflow-y-auto overscroll-contain touch-pan-y">
+            <NavContent activePage={activePage} onNavigate={handleNavigate} collapsed={false} />
+          </div>
+          <div data-testid="mobile-sidebar-footer" className="shrink-0 border-t bg-sidebar p-2">
+            <UserMenu />
+          </div>
+        </SheetContent>
+      </Sheet>
     </>
-  )
+  );
 }

@@ -19,9 +19,9 @@ from .labels import content_type_label, intent_category_label, intent_level_labe
 from .llm_review import build_llm_review_summary
 
 
-def build_lead_report(scan_payload: dict[str, Any]) -> LeadScanReport:
+def build_lead_report(scan_payload: dict[str, Any], *, custom_positive_keywords: list[str] | tuple[str, ...] | None = None) -> LeadScanReport:
     started = time.perf_counter()
-    classifier = LeadIntentClassifier()
+    classifier = LeadIntentClassifier(custom_positive_keywords=custom_positive_keywords)
     content_metadata = _content_metadata(scan_payload)
     content_order = list(content_metadata)
     comments = scan_payload.get("comments", [])

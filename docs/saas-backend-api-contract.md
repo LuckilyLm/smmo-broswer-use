@@ -65,6 +65,9 @@ Some legacy list endpoints still return a plain array; see endpoint tables.
 | `POST` | `/api/auth/logout` | none | `204`/empty response; cookie cleared. |
 | `GET` | `/api/auth/me` | none | Current user, tenant, role, membership. |
 | `GET` | `/api/auth/session` | none | Same as `/api/auth/me`; allowed while password change is required. |
+| `GET` | `/api/auth/sessions` | none | Current user's active session page. |
+| `DELETE` | `/api/auth/sessions/{session_id}` | none | `204`; revokes one owned session. |
+| `POST` | `/api/auth/sessions/revoke-others` | none | `{ revoked }`. |
 | `POST` | `/api/auth/change-password` | `ChangePasswordRequest` | Success payload; old sessions revoked. |
 | `GET` | `/api/tenants` | none | `Tenant[]`. |
 | `POST` | `/api/tenants/{tenant_id}/switch` | none | New current session context. |
@@ -100,7 +103,8 @@ type ChangePasswordRequest = {
 | --- | --- | --- | --- |
 | `GET` | `/api/platform-accounts` | query none | `PlatformAccount[]`. |
 | `POST` | `/api/platform-accounts` | `CreatePlatformAccountRequest` | `PlatformAccount`. |
-| `PATCH` | `/api/platform-accounts/{account_id}` | loose object, currently `display_name` etc. | `PlatformAccount`. |
+| `GET` | `/api/platform-accounts/{account_id}` | none | Platform account aggregate detail. |
+| `PATCH` | `/api/platform-accounts/{account_id}` | `UpdatePlatformAccountRequest` | `PlatformAccount`. |
 | `DELETE` | `/api/platform-accounts/{account_id}` | none | `204`. |
 | `POST` | `/api/platform-accounts/{account_id}/connect` | none | Runtime/connect payload. |
 | `POST` | `/api/platform-accounts/{account_id}/check-login` | none | Login check payload. |
@@ -114,6 +118,12 @@ type ChangePasswordRequest = {
 type CreatePlatformAccountRequest = {
   platform: string;
   display_name: string;
+  external_account_id?: string | null;
+  external_account_name?: string | null;
+};
+
+type UpdatePlatformAccountRequest = {
+  display_name?: string;
   external_account_id?: string | null;
   external_account_name?: string | null;
 };
@@ -146,6 +156,7 @@ type PlatformAccount = {
 | Method | Path | Request | Response |
 | --- | --- | --- | --- |
 | `GET` | `/api/campaigns?limit=&offset=` | none | `Page<Campaign>`. Without query params legacy callers may receive array behavior in older code paths; frontend should pass paging params. |
+| `GET` | `/api/campaigns/{campaign_id}` | none | Campaign aggregate detail. |
 | `POST` | `/api/campaigns` | `CreateCampaignRequest` | `Campaign`; creates campaign and `initial_keywords` transactionally. |
 | `PATCH` | `/api/campaigns/{campaign_id}` | `UpdateCampaignRequest` | `Campaign`. |
 | `DELETE` | `/api/campaigns/{campaign_id}` | none | `204`; soft delete/archive behavior. |
@@ -162,6 +173,7 @@ type PlatformAccount = {
 ```ts
 type CreateCampaignRequest = {
   name: string;
+  description?: string | null;
   platform_account_id: string;
   status?: string | null;
   target_policy?: string | null;
@@ -186,6 +198,9 @@ type CreateCampaignRequest = {
   reply_per_minute_limit?: number | null;
   reply_per_hour_limit?: number | null;
   reply_min_interval_seconds?: number | null;
+  target_regions_json?: string[] | null;
+  content_types_json?: string[] | null;
+  content_language?: string | null;
   initial_keywords?: string[] | null; // max 50
 };
 
@@ -218,10 +233,54 @@ type BulkCreateKeywordsRequest = {
 
 | Method | Path | Query | Response |
 | --- | --- | --- | --- |
-| `GET` | `/api/leads` | `campaign_id`, `platform`, `status`, `rule_intent_level`, `final_intent_level`, `reply_allowed`, `keyword`, `limit`, `offset` | `Page<Lead>`. |
-| `GET` | `/api/leads/{lead_id}` | none | `Lead`. |
+| `GET` | `/api/leads` | `campaign_id`, `platform`, `status`, `intent_level`, `manual_intent_level`, `assigned_user_id`, `rule_intent_level`, `final_intent_level`, `reply_allowed`, `keyword`, `created_from`, `created_to`, `search`, `limit`, `offset` | `Page<Lead>`. |
+| `GET` | `/api/leads/{lead_id}` | none | Lead detail with campaign/account. |
+| `PATCH` | `/api/leads/{lead_id}` | `UpdateLeadRequest` | `Lead`. |
+| `GET` | `/api/leads/{lead_id}/notes` | `limit`, `offset` | `Page<LeadNote>`. |
+| `POST` | `/api/leads/{lead_id}/notes` | `CreateLeadNoteRequest` | `LeadNote`. |
+| `POST` | `/api/leads/{lead_id}/assign` | `AssignLeadRequest` | `Lead`. |
+| `POST` | `/api/leads/{lead_id}/mark-contacted` | none | `Lead`. |
+| `POST` | `/api/leads/{lead_id}/mark-invalid` | `MarkLeadInvalidRequest` | `Lead`. |
+| `POST` | `/api/leads/bulk-update` | `BulkUpdateLeadsRequest` | `{ items, updated }`. |
+| `GET` | `/api/leads/{lead_id}/timeline` | none | `Page<TimelineItem>`. |
 
-Current backend is read-only for leads. Status edits, notes, assignment, batch operations, and timeline APIs are not yet available.
+```ts
+type UpdateLeadRequest = {
+  status?: "new" | "open" | "assigned" | "contacted" | "qualified" | "invalid" | "archived";
+  manual_intent_level?: "low" | "medium" | "high" | "unknown";
+  assigned_user_id?: string | null;
+  contacted_at?: string | null;
+  invalid_reason?: string | null;
+};
+
+type CreateLeadNoteRequest = {
+  note: string;
+  metadata_json?: Record<string, unknown> | null;
+};
+
+type AssignLeadRequest = {
+  assigned_user_id: string;
+};
+
+type MarkLeadInvalidRequest = {
+  invalid_reason: string;
+};
+
+type BulkUpdateLeadsRequest = {
+  lead_ids: string[]; // 1..100
+  status?: UpdateLeadRequest["status"];
+  manual_intent_level?: UpdateLeadRequest["manual_intent_level"];
+  assigned_user_id?: string | null;
+};
+```
+
+Lead state guards:
+
+- Repeated transition to the same state is idempotent.
+- Invalid state transitions return `409 invalid_lead_status_transition`.
+- `invalid` requires `invalid_reason`.
+- Assignment requires an active user in the current tenant.
+- All write operations require tenant writeability, write permission, tenant-scoped lead ownership, and audit logging.
 
 ## Reply Templates
 
@@ -380,7 +439,8 @@ Plan state guards:
 
 | Method | Path | Query | Response |
 | --- | --- | --- | --- |
-| `GET` | `/api/reply-records` | `limit`, `offset` | `Page<ReplyRecord>`. |
+| `GET` | `/api/reply-records` | `campaign_id`, `platform_account_id`, `status`, `verified`, `error_type`, `author_name`, `keyword`, `created_from`, `created_to`, `limit`, `offset` | `Page<ReplyRecord>`. |
+| `GET` | `/api/reply-records/{record_id}` | none | Reply record aggregate detail. |
 
 Reply records are audit records. There is no delete API.
 
@@ -392,8 +452,21 @@ Reply records are audit records. There is no delete API.
 | `GET` | `/api/executions/{execution_id}` | none | `Execution`. |
 | `GET` | `/api/executions/{execution_id}/keywords` | none | `ExecutionKeyword[]`. |
 | `POST` | `/api/executions/{execution_id}/cancel` | none | Updated/cancel-requested execution. |
+| `POST` | `/api/executions/{execution_id}/retry` | none | Queued retry payload. |
+| `GET` | `/api/executions/{execution_id}/timeline` | none | `Page<TimelineItem>`. |
+| `GET` | `/api/executions/{execution_id}/artifacts` | none | `Page<Artifact>`. |
+| `GET` | `/api/executions/{execution_id}/logs` | `limit`, `offset` | Sanitized log page. |
+| `GET` | `/api/executions/{execution_id}/screenshots` | none | Screenshot artifact page. |
+| `GET` | `/api/executions/{execution_id}/token-usage` | `limit`, `offset` | `Page<TokenUsage>`. |
 
 Execution records always include `send_disabled`; frontend should display it and keep reply execution UI disabled when true.
+
+Retry state guards:
+
+- Allowed for `failed`, `cancelled`, or retryable error classifications.
+- Rejected with `409 execution_not_retryable` for `queued`, `running`, and `completed`.
+- Retry enqueues a new execution and preserves historical evidence.
+- Artifact and log access is tenant/execution scoped; logs redact cookies, bearer tokens, access tokens, CSRF headers, and password-like fields.
 
 ## Token Usage
 
@@ -407,12 +480,15 @@ Execution records always include `send_disabled`; frontend should display it and
 | Method | Path | Request | Response |
 | --- | --- | --- | --- |
 | `GET` | `/api/tenant/members` | none | `TenantMember[]`. |
+| `GET` | `/api/tenant/members/{membership_id}` | none | Member aggregate detail. |
 | `POST` | `/api/tenant/members` | `InviteMemberRequest` | Invitation/member payload. |
 | `PATCH` | `/api/tenant/members/{membership_id}` | `UpdateMemberRoleRequest` | Updated member. |
 | `DELETE` | `/api/tenant/members/{membership_id}` | none | `204`. |
 | `POST` | `/api/tenant/transfer-ownership` | `TransferOwnershipRequest` | Updated ownership payload. |
 | `POST` | `/api/tenant/invitations` | `InviteMemberRequest` | Invitation payload. |
 | `GET` | `/api/tenant/invitations` | none | `Invitation[]`. |
+| `GET` | `/api/tenant/invitations/{invitation_id}` | none | Invitation detail. |
+| `POST` | `/api/tenant/invitations/{invitation_id}/resend` | none | Updated invitation. |
 | `DELETE` | `/api/tenant/invitations/{invitation_id}` | none | `204`. |
 | `POST` | `/api/invitations/{token}/accept` | `AcceptInvitationRequest` | Acceptance payload. |
 
@@ -435,12 +511,16 @@ type TransferOwnershipRequest = {
 
 | Method | Path | Query/Request | Response |
 | --- | --- | --- | --- |
-| `GET` | `/api/audit-logs` | query filters in API implementation | Audit log list/page. |
-| `GET` | `/api/notifications` | `unread_only`, limit-style query | Notification page with unread count. |
+| `GET` | `/api/audit-logs` | `user_id`, `action`, `resource_type`, `resource_id`, `result`, `created_from`, `created_to`, `search`, `limit`, `offset` | `Page<AuditLog>`. |
+| `GET` | `/api/audit-logs/{audit_id}` | none | Audit log detail. |
+| `GET` | `/api/audit-logs/export` | tenant-scoped audit filters | `text/csv`. |
+| `GET` | `/api/notifications` | `unread_only`, `type`, `severity`, `limit`, `offset` | Notification page with unread count. |
 | `POST` | `/api/notifications/{notification_id}/read` | none | Updated notification. |
 | `POST` | `/api/notifications/read-all` | none | `{ updated, unread_count }` or equivalent payload. |
+| `DELETE` | `/api/notifications/{notification_id}` | none | `204`. |
+| `POST` | `/api/notifications/clear-read` | none | `{ deleted, unread_count }`. |
 
-No notification delete/cleanup API exists yet.
+Audit logs are append-only. No update or delete endpoints exist.
 
 ## System Admin
 
@@ -455,6 +535,30 @@ System admin endpoints require `user.is_system_admin`.
 | `POST` | `/api/admin/plans` | `CreatePlanRequest` | `Plan`. |
 | `PATCH` | `/api/admin/plans/{plan_id}` | `UpdatePlanRequest` | `Plan`. |
 | `GET` | `/api/admin/system/usage` | none | System usage payload. |
+| `GET` | `/api/admin/users` | `limit`, `offset` | `Page<User>`. |
+| `GET` | `/api/admin/users/{user_id}` | none | User detail without password hash. |
+| `GET` | `/api/admin/system/health` | none | API, PostgreSQL, worker, scheduler, queue, runtime health. |
+| `GET` | `/api/admin/system/runtimes` | `limit`, `offset` | Runtime page without profile path or CDP URL. |
+| `GET` | `/api/admin/system/queue` | `limit`, `offset` | Queue item page. |
+| `GET` | `/api/admin/audit-logs` | `limit`, `offset` | System audit page. |
+
+## Database Migration
+
+Revision `010_frontend_crud_support` adds Campaign UI fields, Lead management fields, and `lead_notes`.
+
+Added columns:
+
+- `campaigns.description`
+- `campaigns.target_regions_json`
+- `campaigns.content_types_json`
+- `campaigns.content_language`
+- `leads.manual_intent_level`
+- `leads.assigned_user_id`
+- `leads.contacted_at`
+- `leads.invalid_reason`
+- `leads.updated_by`
+
+The migration intentionally contains no database foreign keys.
 
 ## Core Response Records
 
@@ -465,7 +569,16 @@ type Campaign = {
   id: string;
   tenant_id: string;
   name: string;
+  description?: string | null;
   platform_account_id: string;
+  platform?: string | null;
+  platform_account_name?: string | null;
+  keyword_count?: number;
+  lead_count?: number;
+  pending_reply_count?: number;
+  last_execution_at?: string | null;
+  next_run_at?: string | null;
+  owner_name?: string | null;
   status: string;
   target_policy: string;
   max_contents: number;
@@ -484,6 +597,9 @@ type Campaign = {
   default_email?: string | null;
   default_website?: string | null;
   default_contact_text?: string | null;
+  target_regions_json?: string[];
+  content_types_json?: string[];
+  content_language?: string;
   deleted_at?: string | null;
   created_at: string;
   updated_at: string;

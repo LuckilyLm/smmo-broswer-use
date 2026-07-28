@@ -3,7 +3,9 @@ from __future__ import annotations
 import os
 import hashlib
 import hmac
+import mimetypes
 import time
+import uuid
 from collections import defaultdict, deque
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
@@ -14,7 +16,7 @@ from dotenv import load_dotenv
 from fastapi import Cookie, Depends, FastAPI, Header, HTTPException, Request, Response
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import FileResponse, JSONResponse
 
 from .db import utc_now
 from .config import ProductionConfig
@@ -30,10 +32,13 @@ from .routers.leads import create_router as create_leads_router
 from .routers.platform_accounts import create_router as create_platform_accounts_router
 from .schemas import (
     AcceptInvitationRequest,
+    AssignLeadRequest,
     ChangePasswordRequest,
     BulkCreateKeywordsRequest,
     BulkApproveReplyCandidatesRequest,
     BulkRejectReplyCandidatesRequest,
+    BulkUpdateLeadsRequest,
+    CreateLeadNoteRequest,
     CreatePlanRequest,
     CreateCampaignRequest,
     CreateKeywordRequest,
@@ -46,6 +51,7 @@ from .schemas import (
     RejectReplyCandidateRequest,
     ResetProfileRequest,
     ScheduleRequest,
+    MarkLeadInvalidRequest,
     TransferOwnershipRequest,
     UpdateMemberRoleRequest,
     UpdatePlanRequest,
@@ -54,6 +60,8 @@ from .schemas import (
     UpdateTenantSettingsRequest,
     UpdateCampaignRequest,
     UpdateKeywordRequest,
+    UpdateLeadRequest,
+    UpdatePlatformAccountRequest,
     UpdateReplyMatchRuleRequest,
     UpdateReplyCandidateContentRequest,
     UpdateReplyTemplateRequest,
@@ -99,11 +107,11 @@ def create_app(*, database_url: str | None = None, service: SaaSService | None =
         runtime_registry = BrowserRuntimeRegistry(
             storage,
             profiles_root=config.browser_profile_root,
-            chrome_executable=config.chrome_executable,
             cdp_port_start=config.browser_cdp_port_start,
             cdp_port_end=config.browser_cdp_port_end,
             runtime_host=config.runtime_host,
-            allow_chrome_discovery=not config.is_production,
+            browser_headless=config.browser_headless,
+            allow_chrome_discovery=True,
         )
         service_instance = SaaSService(
             storage,
@@ -154,7 +162,47 @@ def create_app(*, database_url: str | None = None, service: SaaSService | None =
 
     @app.middleware("http")
     async def audit_mutations(request: Request, call_next):
-        response = await call_next(request)
+        request_id = request.headers.get("x-request-id") or f"req_{uuid.uuid4().hex[:12]}"
+        started = time.perf_counter()
+        forwarded = request.headers.get("x-forwarded-for", "") if config.trust_proxy else ""
+        ip_address = forwarded.split(",", 1)[0].strip() if forwarded else request.client.host if request.client else None
+        logger.info(
+            "api request started",
+            extra={
+                "request_id": request_id,
+                "method": request.method,
+                "path": request.url.path,
+                "query": str(request.url.query),
+                "client_ip": ip_address,
+            },
+        )
+        try:
+            response = await call_next(request)
+        except Exception:
+            logger.exception(
+                "api request crashed",
+                extra={
+                    "request_id": request_id,
+                    "method": request.method,
+                    "path": request.url.path,
+                    "client_ip": ip_address,
+                    "duration_ms": int((time.perf_counter() - started) * 1000),
+                },
+            )
+            raise
+        duration_ms = int((time.perf_counter() - started) * 1000)
+        logger.info(
+            "api request completed",
+            extra={
+                "request_id": request_id,
+                "method": request.method,
+                "path": request.url.path,
+                "status_code": response.status_code,
+                "duration_ms": duration_ms,
+                "client_ip": ip_address,
+            },
+        )
+        response.headers["x-request-id"] = request_id
         if request.method in {"POST", "PUT", "PATCH", "DELETE"} and request.url.path.startswith("/api/") and response.status_code < 400:
             authorization = request.headers.get("authorization", "")
             cookie = request.cookies.get(SESSION_COOKIE, "")
@@ -163,8 +211,6 @@ def create_app(*, database_url: str | None = None, service: SaaSService | None =
                 context = service_instance.context_from_token(token) if token else None
             except PermissionError:
                 context = None
-            forwarded = request.headers.get("x-forwarded-for", "") if config.trust_proxy else ""
-            ip_address = forwarded.split(",", 1)[0].strip() if forwarded else request.client.host if request.client else None
             service_instance.audit.record(
                 action=f"api.{request.method.lower()}",
                 resource_type="api",
@@ -178,7 +224,7 @@ def create_app(*, database_url: str | None = None, service: SaaSService | None =
         return response
 
     @app.exception_handler(HTTPException)
-    async def http_error(_request: Request, exc: HTTPException) -> JSONResponse:
+    async def http_error(request: Request, exc: HTTPException) -> JSONResponse:
         code = {400: "bad_request", 401: "session_expired", 403: "permission_denied", 404: "not_found", 409: "conflict", 429: "rate_limit_reached", 501: "not_implemented", 503: "service_unavailable"}.get(exc.status_code, "request_failed")
         message = exc.detail if isinstance(exc.detail, str) else "Request failed"
         if isinstance(exc.detail, dict):
@@ -186,39 +232,45 @@ def create_app(*, database_url: str | None = None, service: SaaSService | None =
             message = str(exc.detail.get("message") or message)
         if message == "queue_limit_reached":
             code = "queue_limit_reached"
+        logger.warning("api http error", extra={"path": request.url.path, "status_code": exc.status_code, "error_code": code})
         return JSONResponse(status_code=exc.status_code, content={"error": {"code": code, "message": message}})
 
     @app.exception_handler(BrowserRuntimeError)
-    async def browser_runtime_error(_request: Request, exc: BrowserRuntimeError) -> JSONResponse:
+    async def browser_runtime_error(request: Request, exc: BrowserRuntimeError) -> JSONResponse:
         status_code = 501 if exc.error_type in {
             "runtime_host_not_implemented",
             "local_browser_runtime_not_supported",
             "browser_runtime_host_unavailable",
         } else 400
+        logger.warning("browser runtime error", extra={"path": request.url.path, "status_code": status_code, "error_type": exc.error_type})
         return JSONResponse(status_code=status_code, content={"error": {"code": exc.error_type, "message": str(exc)}})
 
     @app.exception_handler(PermissionError)
-    async def permission_error(_request: Request, exc: PermissionError) -> JSONResponse:
+    async def permission_error(request: Request, exc: PermissionError) -> JSONResponse:
         not_found = "not found" in str(exc).lower()
         suspended = str(exc) == "tenant_suspended"
+        logger.warning("api permission error", extra={"path": request.url.path, "status_code": 404 if not_found else 403, "error_type": str(exc)})
         return JSONResponse(
             status_code=404 if not_found else 403,
             content={"error": {"code": "not_found" if not_found else "tenant_suspended" if suspended else "permission_denied", "message": "not found" if not_found else str(exc)}},
         )
 
     @app.exception_handler(ValueError)
-    async def value_error(_request: Request, exc: ValueError) -> JSONResponse:
+    async def value_error(request: Request, exc: ValueError) -> JSONResponse:
+        logger.warning("api value error", extra={"path": request.url.path, "status_code": 400, "error_type": str(exc)})
         return JSONResponse(status_code=400, content={"error": {"code": str(exc), "message": str(exc)}})
 
     @app.exception_handler(ServiceConflictError)
-    async def service_conflict(_request: Request, exc: ServiceConflictError) -> JSONResponse:
+    async def service_conflict(request: Request, exc: ServiceConflictError) -> JSONResponse:
+        logger.warning("api service conflict", extra={"path": request.url.path, "status_code": 409, "error_type": str(exc)})
         return JSONResponse(
             status_code=409,
             content={"error": {"code": str(exc), "message": str(exc)}},
         )
 
     @app.exception_handler(QuotaExceededError)
-    async def quota_exceeded(_request: Request, exc: QuotaExceededError) -> JSONResponse:
+    async def quota_exceeded(request: Request, exc: QuotaExceededError) -> JSONResponse:
+        logger.warning("api quota exceeded", extra={"path": request.url.path, "resource": exc.resource, "limit": exc.limit, "used": exc.used})
         return JSONResponse(
             status_code=429,
             content={
@@ -233,14 +285,15 @@ def create_app(*, database_url: str | None = None, service: SaaSService | None =
         )
 
     @app.exception_handler(FeatureNotAvailableError)
-    async def feature_not_available(_request: Request, exc: FeatureNotAvailableError) -> JSONResponse:
+    async def feature_not_available(request: Request, exc: FeatureNotAvailableError) -> JSONResponse:
+        logger.warning("api feature unavailable", extra={"path": request.url.path, "feature": exc.feature})
         return JSONResponse(
             status_code=403,
             content={"error": {"code": "feature_not_available", "message": str(exc), "feature": exc.feature}},
         )
 
     @app.exception_handler(RequestValidationError)
-    async def validation_error(_request: Request, exc: RequestValidationError) -> JSONResponse:
+    async def validation_error(request: Request, exc: RequestValidationError) -> JSONResponse:
         field_errors = [
             {
                 "field": ".".join(str(part) for part in error.get("loc", []) if part not in {"body", "query", "path"}),
@@ -248,6 +301,7 @@ def create_app(*, database_url: str | None = None, service: SaaSService | None =
             }
             for error in exc.errors()
         ]
+        logger.warning("api validation error", extra={"path": request.url.path, "fields": field_errors})
         return JSONResponse(
             status_code=422,
             content={
@@ -260,7 +314,8 @@ def create_app(*, database_url: str | None = None, service: SaaSService | None =
         )
 
     @app.exception_handler(Exception)
-    async def internal_error(_request: Request, _exc: Exception) -> JSONResponse:
+    async def internal_error(request: Request, exc: Exception) -> JSONResponse:
+        logger.exception("api internal error", extra={"path": request.url.path, "error_type": type(exc).__name__})
         return JSONResponse(status_code=500, content={"error": {"code": "internal_error", "message": "Internal server error"}})
 
     def get_service() -> SaaSService:
@@ -364,6 +419,37 @@ def create_app(*, database_url: str | None = None, service: SaaSService | None =
     def session(context: TenantContext = Depends(require_context), svc: SaaSService = Depends(get_service)) -> dict[str, Any]:
         return svc.me(context)
 
+    @auth_router.get("/api/auth/sessions")
+    def auth_sessions(context: TenantContext = Depends(require_context), svc: SaaSService = Depends(get_service)) -> dict[str, Any]:
+        items = svc.storage.list("sessions", filters={"user_id": context.user_id}, limit=200)
+        for item in items:
+            item["current"] = item.get("tenant_id") == context.tenant_id and not item.get("revoked_at")
+        active = [item for item in items if not item.get("revoked_at")]
+        return {"items": active, "limit": 200, "offset": 0, "total": len(active)}
+
+    @auth_router.delete("/api/auth/sessions/{session_id}", status_code=204)
+    def revoke_session(session_id: str, context: TenantContext = Depends(require_context), svc: SaaSService = Depends(get_service)) -> Response:
+        row = svc.storage.get_by_id("sessions", session_id)
+        if not row or row.get("user_id") != context.user_id:
+            raise HTTPException(status_code=404, detail="not found")
+        svc.storage.update_by_id("sessions", session_id, {"revoked_at": utc_now()})
+        return Response(status_code=204)
+
+    @auth_router.post("/api/auth/sessions/revoke-others")
+    def revoke_other_sessions(
+        authorization: str = Header(default=""),
+        session_cookie: str = Cookie(default="", alias=SESSION_COOKIE),
+        context: TenantContext = Depends(require_context),
+        svc: SaaSService = Depends(get_service),
+    ) -> dict[str, int]:
+        current_token = _session_token(authorization, session_cookie, config.session_secret)
+        updated = 0
+        for row in svc.storage.list("sessions", filters={"user_id": context.user_id}, limit=1000):
+            if row["id"] != current_token and not row.get("revoked_at"):
+                svc.storage.update_by_id("sessions", row["id"], {"revoked_at": utc_now()})
+                updated += 1
+        return {"revoked": updated}
+
     @auth_router.post("/api/auth/change-password")
     def change_password(
         payload: ChangePasswordRequest,
@@ -407,8 +493,11 @@ def create_app(*, database_url: str | None = None, service: SaaSService | None =
         return {"tenant_id": rotated["tenant_id"], "access_token": rotated["access_token"]}
 
     @app.get("/api/dashboard/summary")
-    def dashboard(context: TenantContext = Depends(require_context), svc: SaaSService = Depends(get_service)) -> dict[str, Any]:
-        return svc.dashboard_summary(context)
+    def dashboard(range: str = "7d", context: TenantContext = Depends(require_context), svc: SaaSService = Depends(get_service)) -> dict[str, Any]:
+        days = {"7d": 7, "14d": 14, "30d": 30}.get(range)
+        if days is None:
+            raise HTTPException(status_code=400, detail="invalid_range")
+        return svc.dashboard_summary(context, range_days=days)
 
     @platform_accounts_router.get("/api/platform-accounts")
     def list_platform_accounts(context: TenantContext = Depends(require_context), svc: SaaSService = Depends(get_service)) -> list[dict[str, Any]]:
@@ -422,9 +511,9 @@ def create_app(*, database_url: str | None = None, service: SaaSService | None =
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     @platform_accounts_router.patch("/api/platform-accounts/{account_id}")
-    def update_platform_account(account_id: str, payload: dict[str, Any], context: TenantContext = Depends(require_context), svc: SaaSService = Depends(get_service)) -> dict[str, Any]:
+    def update_platform_account(account_id: str, payload: UpdatePlatformAccountRequest, context: TenantContext = Depends(require_context), svc: SaaSService = Depends(get_service)) -> dict[str, Any]:
         try:
-            row = svc.update_platform_account(context, account_id, payload)
+            row = svc.update_platform_account(context, account_id, payload.model_dump(exclude_none=True))
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         if not row:
@@ -435,6 +524,36 @@ def create_app(*, database_url: str | None = None, service: SaaSService | None =
     def delete_platform_account(account_id: str, context: TenantContext = Depends(require_context), svc: SaaSService = Depends(get_service)) -> Response:
         svc.delete_platform_account(context, account_id)
         return Response(status_code=204)
+
+    @platform_accounts_router.get("/api/platform-accounts/{account_id}")
+    def get_platform_account_detail(account_id: str, context: TenantContext = Depends(require_context), svc: SaaSService = Depends(get_service)) -> dict[str, Any]:
+        account = svc.storage.get_by_id("platform_accounts", account_id, tenant_id=context.tenant_id)
+        if not account:
+            raise HTTPException(status_code=404, detail="not found")
+        runtime = svc.get_platform_runtime(context, account_id)
+        recent_executions = svc.storage.query_all(
+            "SELECT e.* FROM executions e JOIN campaigns c ON c.id = e.campaign_id WHERE e.tenant_id = ? AND c.platform_account_id = ? ORDER BY e.created_at DESC LIMIT ?",
+            [context.tenant_id, account_id, 10],
+        )
+        recent_errors = [row for row in recent_executions if row.get("error_type") or row.get("status") == "failed"][:5]
+        campaign_count = svc.storage.count("campaigns", tenant_id=context.tenant_id, filters={"platform_account_id": account_id, "deleted_at": None})
+        active_campaign_count = svc.storage.count("campaigns", tenant_id=context.tenant_id, filters={"platform_account_id": account_id, "status": "active", "deleted_at": None})
+        running = runtime and runtime.get("status") == "running"
+        return {
+            "account": account,
+            "runtime": runtime,
+            "recent_executions": recent_executions,
+            "campaign_count": campaign_count,
+            "active_campaign_count": active_campaign_count,
+            "recent_errors": recent_errors,
+            "capabilities": {
+                "can_start": not running,
+                "can_stop": bool(running),
+                "can_restart": bool(runtime),
+                "can_check_login": bool(runtime),
+                "can_reset_profile": False,
+            },
+        }
 
     @platform_accounts_router.post("/api/platform-accounts/{account_id}/connect")
     def connect_platform_account(account_id: str, context: TenantContext = Depends(require_context), svc: SaaSService = Depends(get_service)) -> dict[str, Any]:
@@ -487,16 +606,40 @@ def create_app(*, database_url: str | None = None, service: SaaSService | None =
         return runtime
 
     @campaigns_router.get("/api/campaigns")
-    def list_campaigns(request: Request, limit: int = 50, offset: int = 0, context: TenantContext = Depends(require_context), svc: SaaSService = Depends(get_service)) -> Any:
+    def list_campaigns(
+        request: Request,
+        status: str | None = None,
+        platform: str | None = None,
+        platform_account_id: str | None = None,
+        reply_mode: str | None = None,
+        search: str | None = None,
+        owner_user_id: str | None = None,
+        created_from: datetime | None = None,
+        created_to: datetime | None = None,
+        limit: int = 20,
+        offset: int = 0,
+        context: TenantContext = Depends(require_context),
+        svc: SaaSService = Depends(get_service),
+    ) -> Any:
         safe_limit = min(max(limit, 1), 200)
-        items = svc.list_campaigns(context, limit=safe_limit, offset=max(offset, 0))
+        filters = {
+            "status": status,
+            "platform": platform,
+            "platform_account_id": platform_account_id,
+            "reply_mode": reply_mode,
+            "search": search,
+            "owner_user_id": owner_user_id,
+            "created_from": created_from,
+            "created_to": created_to,
+        }
+        items = svc.list_campaigns(context, filters, limit=safe_limit, offset=max(offset, 0))
         if "limit" not in request.query_params and "offset" not in request.query_params:
             return items
         return {
             "items": items,
             "limit": safe_limit,
             "offset": max(offset, 0),
-            "total": svc.storage.count("campaigns", tenant_id=context.tenant_id, filters={"deleted_at": None}),
+            "total": svc.count_campaigns(context, filters),
         }
 
     @campaigns_router.post("/api/campaigns")
@@ -509,6 +652,13 @@ def create_app(*, database_url: str | None = None, service: SaaSService | None =
             raise_resource_permission_error(exc)
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @campaigns_router.get("/api/campaigns/{campaign_id}")
+    def get_campaign(campaign_id: str, context: TenantContext = Depends(require_context), svc: SaaSService = Depends(get_service)) -> dict[str, Any]:
+        try:
+            return svc.get_campaign_detail(context, campaign_id)
+        except PermissionError as exc:
+            raise_resource_permission_error(exc)
 
     @campaigns_router.patch("/api/campaigns/{campaign_id}")
     def update_campaign(campaign_id: str, payload: UpdateCampaignRequest, context: TenantContext = Depends(require_context), svc: SaaSService = Depends(get_service)) -> dict[str, Any]:
@@ -598,11 +748,17 @@ def create_app(*, database_url: str | None = None, service: SaaSService | None =
         campaign_id: str | None = None,
         platform: str | None = None,
         status: str | None = None,
+        intent_level: str | None = None,
+        manual_intent_level: str | None = None,
+        assigned_user_id: str | None = None,
         rule_intent_level: str | None = None,
         final_intent_level: str | None = None,
         reply_allowed: bool | None = None,
         keyword: str | None = None,
-        limit: int = 50,
+        created_from: datetime | None = None,
+        created_to: datetime | None = None,
+        search: str | None = None,
+        limit: int = 20,
         offset: int = 0,
         context: TenantContext = Depends(require_context),
         svc: SaaSService = Depends(get_service),
@@ -613,10 +769,16 @@ def create_app(*, database_url: str | None = None, service: SaaSService | None =
                 "campaign_id": campaign_id,
                 "platform": platform,
                 "status": status,
+                "intent_level": intent_level,
+                "manual_intent_level": manual_intent_level,
+                "assigned_user_id": assigned_user_id,
                 "rule_intent_level": rule_intent_level,
                 "final_intent_level": final_intent_level,
                 "reply_allowed": reply_allowed,
                 "keyword": keyword,
+                "created_from": created_from,
+                "created_to": created_to,
+                "search": search,
             },
             limit=limit,
             offset=offset,
@@ -628,6 +790,66 @@ def create_app(*, database_url: str | None = None, service: SaaSService | None =
         if not row:
             raise HTTPException(status_code=404, detail="not found")
         return row
+
+    @leads_router.patch("/api/leads/{lead_id}")
+    def update_lead(lead_id: str, payload: UpdateLeadRequest, context: TenantContext = Depends(require_context), svc: SaaSService = Depends(get_service)) -> dict[str, Any]:
+        try:
+            return svc.update_lead(context, lead_id, payload.model_dump(exclude_none=True))
+        except PermissionError as exc:
+            raise_resource_permission_error(exc)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @leads_router.get("/api/leads/{lead_id}/notes")
+    def list_lead_notes(lead_id: str, limit: int = 20, offset: int = 0, context: TenantContext = Depends(require_context), svc: SaaSService = Depends(get_service)) -> dict[str, Any]:
+        try:
+            return svc.list_lead_notes(context, lead_id, limit=limit, offset=offset)
+        except PermissionError as exc:
+            raise_resource_permission_error(exc)
+
+    @leads_router.post("/api/leads/{lead_id}/notes")
+    def create_lead_note(lead_id: str, payload: CreateLeadNoteRequest, context: TenantContext = Depends(require_context), svc: SaaSService = Depends(get_service)) -> dict[str, Any]:
+        try:
+            return svc.create_lead_note(context, lead_id, payload.model_dump(exclude_none=True))
+        except PermissionError as exc:
+            raise_resource_permission_error(exc)
+
+    @leads_router.post("/api/leads/{lead_id}/assign")
+    def assign_lead(lead_id: str, payload: AssignLeadRequest, context: TenantContext = Depends(require_context), svc: SaaSService = Depends(get_service)) -> dict[str, Any]:
+        try:
+            return svc.assign_lead(context, lead_id, payload.assigned_user_id)
+        except PermissionError as exc:
+            raise_resource_permission_error(exc)
+
+    @leads_router.post("/api/leads/{lead_id}/mark-contacted")
+    def mark_lead_contacted(lead_id: str, context: TenantContext = Depends(require_context), svc: SaaSService = Depends(get_service)) -> dict[str, Any]:
+        try:
+            return svc.mark_lead_contacted(context, lead_id)
+        except PermissionError as exc:
+            raise_resource_permission_error(exc)
+
+    @leads_router.post("/api/leads/{lead_id}/mark-invalid")
+    def mark_lead_invalid(lead_id: str, payload: MarkLeadInvalidRequest, context: TenantContext = Depends(require_context), svc: SaaSService = Depends(get_service)) -> dict[str, Any]:
+        try:
+            return svc.mark_lead_invalid(context, lead_id, payload.invalid_reason)
+        except PermissionError as exc:
+            raise_resource_permission_error(exc)
+
+    @leads_router.post("/api/leads/bulk-update")
+    def bulk_update_leads(payload: BulkUpdateLeadsRequest, context: TenantContext = Depends(require_context), svc: SaaSService = Depends(get_service)) -> dict[str, Any]:
+        try:
+            data = payload.model_dump(exclude_none=True)
+            lead_ids = data.pop("lead_ids")
+            return svc.bulk_update_leads(context, lead_ids, data)
+        except PermissionError as exc:
+            raise_resource_permission_error(exc)
+
+    @leads_router.get("/api/leads/{lead_id}/timeline")
+    def lead_timeline(lead_id: str, context: TenantContext = Depends(require_context), svc: SaaSService = Depends(get_service)) -> dict[str, Any]:
+        try:
+            return svc.lead_timeline(context, lead_id)
+        except PermissionError as exc:
+            raise_resource_permission_error(exc)
 
     @campaigns_router.get("/api/reply-rules")
     def list_reply_rules(context: TenantContext = Depends(require_context), svc: SaaSService = Depends(get_service)) -> list[dict[str, Any]]:
@@ -753,8 +975,44 @@ def create_app(*, database_url: str | None = None, service: SaaSService | None =
         return svc.execute_reply_plan(context, plan_id)
 
     @campaigns_router.get("/api/reply-records")
-    def list_reply_records(limit: int = 100, offset: int = 0, context: TenantContext = Depends(require_context), svc: SaaSService = Depends(get_service)) -> dict[str, Any]:
-        return svc.list_reply_records(context, limit=limit, offset=offset)
+    def list_reply_records(
+        campaign_id: str | None = None,
+        platform_account_id: str | None = None,
+        status: str | None = None,
+        verified: bool | None = None,
+        error_type: str | None = None,
+        author_name: str | None = None,
+        keyword: str | None = None,
+        created_from: datetime | None = None,
+        created_to: datetime | None = None,
+        limit: int = 20,
+        offset: int = 0,
+        context: TenantContext = Depends(require_context),
+        svc: SaaSService = Depends(get_service),
+    ) -> dict[str, Any]:
+        return svc.query_reply_records(
+            context,
+            {
+                "campaign_id": campaign_id,
+                "platform_account_id": platform_account_id,
+                "status": status,
+                "verified": verified,
+                "error_type": error_type,
+                "author_name": author_name,
+                "keyword": keyword,
+                "created_from": created_from,
+                "created_to": created_to,
+            },
+            limit=limit,
+            offset=offset,
+        )
+
+    @campaigns_router.get("/api/reply-records/{record_id}")
+    def get_reply_record(record_id: str, context: TenantContext = Depends(require_context), svc: SaaSService = Depends(get_service)) -> dict[str, Any]:
+        try:
+            return svc.get_reply_record_detail(context, record_id)
+        except PermissionError as exc:
+            raise_resource_permission_error(exc)
 
     @executions_router.get("/api/executions")
     def list_executions(request: Request, limit: int = 50, offset: int = 0, context: TenantContext = Depends(require_context), svc: SaaSService = Depends(get_service)) -> Any:
@@ -787,6 +1045,73 @@ def create_app(*, database_url: str | None = None, service: SaaSService | None =
     def cancel_execution(execution_id: str, context: TenantContext = Depends(require_context), svc: SaaSService = Depends(get_service)) -> dict[str, Any]:
         try:
             return svc.cancel_execution(context, execution_id)
+        except PermissionError as exc:
+            raise_resource_permission_error(exc)
+
+    @executions_router.post("/api/executions/{execution_id}/retry")
+    def retry_execution(execution_id: str, context: TenantContext = Depends(require_context), svc: SaaSService = Depends(get_service)) -> dict[str, Any]:
+        try:
+            return svc.retry_execution(context, execution_id)
+        except PermissionError as exc:
+            raise_resource_permission_error(exc)
+
+    @executions_router.get("/api/executions/{execution_id}/timeline")
+    def execution_timeline(execution_id: str, context: TenantContext = Depends(require_context), svc: SaaSService = Depends(get_service)) -> dict[str, Any]:
+        try:
+            return svc.execution_timeline(context, execution_id)
+        except PermissionError as exc:
+            raise_resource_permission_error(exc)
+
+    @executions_router.get("/api/executions/{execution_id}/artifacts")
+    def execution_artifacts(execution_id: str, context: TenantContext = Depends(require_context), svc: SaaSService = Depends(get_service)) -> dict[str, Any]:
+        try:
+            return svc.execution_artifacts(context, execution_id)
+        except PermissionError as exc:
+            raise_resource_permission_error(exc)
+
+    @executions_router.get("/api/executions/{execution_id}/artifacts/{artifact_path:path}")
+    def execution_artifact_file(
+        execution_id: str,
+        artifact_path: str,
+        download: bool = False,
+        context: TenantContext = Depends(require_context),
+        svc: SaaSService = Depends(get_service),
+    ) -> FileResponse:
+        try:
+            path = svc.execution_artifact_path(context, execution_id, artifact_path)
+        except PermissionError as exc:
+            raise_resource_permission_error(exc)
+        except FileNotFoundError as exc:
+            raise HTTPException(status_code=404, detail="artifact not found") from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail="invalid artifact path") from exc
+        media_type = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
+        disposition = "attachment" if download else "inline"
+        return FileResponse(
+            path,
+            media_type=media_type,
+            filename=path.name,
+            headers={"Content-Disposition": f'{disposition}; filename="{path.name}"'},
+        )
+
+    @executions_router.get("/api/executions/{execution_id}/logs")
+    def execution_logs(execution_id: str, limit: int = 100, offset: int = 0, context: TenantContext = Depends(require_context), svc: SaaSService = Depends(get_service)) -> dict[str, Any]:
+        try:
+            return svc.execution_logs(context, execution_id, limit=limit, offset=offset)
+        except PermissionError as exc:
+            raise_resource_permission_error(exc)
+
+    @executions_router.get("/api/executions/{execution_id}/screenshots")
+    def execution_screenshots(execution_id: str, context: TenantContext = Depends(require_context), svc: SaaSService = Depends(get_service)) -> dict[str, Any]:
+        try:
+            return svc.execution_artifacts(context, execution_id, artifact_type="screenshot")
+        except PermissionError as exc:
+            raise_resource_permission_error(exc)
+
+    @executions_router.get("/api/executions/{execution_id}/token-usage")
+    def execution_token_usage(execution_id: str, limit: int = 100, offset: int = 0, context: TenantContext = Depends(require_context), svc: SaaSService = Depends(get_service)) -> dict[str, Any]:
+        try:
+            return svc.execution_token_usage(context, execution_id, limit=limit, offset=offset)
         except PermissionError as exc:
             raise_resource_permission_error(exc)
 
@@ -857,6 +1182,17 @@ def create_app(*, database_url: str | None = None, service: SaaSService | None =
     ) -> dict[str, Any]:
         return svc.tenant_admin.list_members(context, limit=min(max(limit, 1), 200), offset=max(offset, 0))
 
+    @app.get("/api/tenant/members/{membership_id}")
+    def member_detail(membership_id: str, context: TenantContext = Depends(require_context), svc: SaaSService = Depends(get_service)) -> dict[str, Any]:
+        page = svc.tenant_admin.list_members(context, limit=200, offset=0)
+        membership = next((row for row in page["items"] if row["id"] == membership_id), None)
+        if not membership:
+            raise HTTPException(status_code=404, detail="not found")
+        user = svc.storage.get_by_id("users", membership["user_id"])
+        recent = svc.storage.list("audit_logs", tenant_id=context.tenant_id, filters={"user_id": membership["user_id"]}, limit=10)
+        active_sessions = svc.storage.count("sessions", filters={"user_id": membership["user_id"], "revoked_at": None})
+        return {"user": _public_api_user(user or {}), "membership": membership, "role": membership["role"], "joined_at": membership.get("created_at"), "last_active_at": None, "active_sessions_count": active_sessions, "recent_audit_actions": recent}
+
     @app.post("/api/tenant/members")
     def add_member(
         payload: InviteMemberRequest,
@@ -908,6 +1244,26 @@ def create_app(*, database_url: str | None = None, service: SaaSService | None =
     ) -> dict[str, Any]:
         return svc.tenant_admin.list_invitations(context, limit=min(max(limit, 1), 200), offset=max(offset, 0))
 
+    @app.get("/api/tenant/invitations/{invitation_id}")
+    def invitation_detail(invitation_id: str, context: TenantContext = Depends(require_context), svc: SaaSService = Depends(get_service)) -> dict[str, Any]:
+        invitation = svc.storage.get_by_id("tenant_invitations", invitation_id, tenant_id=context.tenant_id)
+        if not invitation:
+            raise HTTPException(status_code=404, detail="not found")
+        return invitation
+
+    @app.post("/api/tenant/invitations/{invitation_id}/resend")
+    def resend_invitation(invitation_id: str, context: TenantContext = Depends(require_context), svc: SaaSService = Depends(get_service)) -> dict[str, Any]:
+        if context.role not in {"owner", "admin"}:
+            raise PermissionError("owner or admin role required")
+        invitation = svc.storage.get_by_id("tenant_invitations", invitation_id, tenant_id=context.tenant_id)
+        if not invitation:
+            raise HTTPException(status_code=404, detail="not found")
+        if invitation.get("status") != "pending":
+            raise ServiceConflictError("invitation_not_pending")
+        updated = svc.storage.update_by_id("tenant_invitations", invitation_id, {"expires_at": utc_now() + timedelta(days=7)}, tenant_id=context.tenant_id) or invitation
+        svc.audit.record(action="invitation.resend", resource_type="tenant_invitation", resource_id=invitation_id, tenant_id=context.tenant_id, user_id=context.user_id)
+        return updated
+
     @app.delete("/api/tenant/invitations/{invitation_id}", status_code=204)
     def revoke_invitation(
         invitation_id: str,
@@ -944,6 +1300,9 @@ def create_app(*, database_url: str | None = None, service: SaaSService | None =
     def audit_logs(
         action: str | None = None,
         resource_type: str | None = None,
+        resource_id: str | None = None,
+        result: str | None = None,
+        search: str | None = None,
         user_id: str | None = None,
         date_from: datetime | None = None,
         date_to: datetime | None = None,
@@ -957,10 +1316,17 @@ def create_app(*, database_url: str | None = None, service: SaaSService | None =
         safe_limit, safe_offset = min(max(limit, 1), 200), max(offset, 0)
         clauses: list[str] = ["tenant_id = ?"]
         values: list[Any] = [context.tenant_id]
-        for column, value in (("action", action), ("resource_type", resource_type), ("user_id", user_id)):
+        for column, value in (("action", action), ("resource_type", resource_type), ("resource_id", resource_id), ("user_id", user_id)):
             if value:
                 clauses.append(f"{column} = ?")
                 values.append(value)
+        if result:
+            clauses.append("CAST(metadata_json AS TEXT) LIKE ?")
+            values.append(f"%{result}%")
+        if search:
+            clauses.append("(LOWER(action) LIKE ? OR LOWER(resource_type) LIKE ? OR LOWER(COALESCE(resource_id, '')) LIKE ?)")
+            like = f"%{search.lower()}%"
+            values.extend([like, like, like])
         if date_from:
             clauses.append("created_at >= ?")
             values.append(date_from)
@@ -980,9 +1346,38 @@ def create_app(*, database_url: str | None = None, service: SaaSService | None =
             item["user_display_name"] = actor.get("display_name") if actor else None
         return {"items": items, "limit": safe_limit, "offset": safe_offset, "total": total}
 
+    @app.get("/api/audit-logs/export")
+    def audit_logs_export(
+        action: str | None = None,
+        resource_type: str | None = None,
+        resource_id: str | None = None,
+        user_id: str | None = None,
+        context: TenantContext = Depends(require_context),
+        svc: SaaSService = Depends(get_service),
+    ) -> Response:
+        page = audit_logs(action=action, resource_type=resource_type, resource_id=resource_id, user_id=user_id, limit=200, offset=0, context=context, svc=svc)
+        header = ["id", "created_at", "user_id", "action", "resource_type", "resource_id"]
+        lines = [",".join(header)]
+        for row in page["items"]:
+            lines.append(",".join(_csv_cell(row.get(column)) for column in header))
+        return Response(content="\n".join(lines), media_type="text/csv")
+
+    @app.get("/api/audit-logs/{audit_id}")
+    def audit_log_detail(audit_id: str, context: TenantContext = Depends(require_context), svc: SaaSService = Depends(get_service)) -> dict[str, Any]:
+        if context.role not in {"owner", "admin"}:
+            raise PermissionError("owner or admin role required")
+        row = svc.storage.get_by_id("audit_logs", audit_id, tenant_id=context.tenant_id)
+        if not row:
+            raise HTTPException(status_code=404, detail="not found")
+        actor = svc.storage.get_by_id("users", row["user_id"]) if row.get("user_id") else None
+        row["user_display_name"] = actor.get("display_name") if actor else None
+        return row
+
     @app.get("/api/notifications")
     def notifications(
         unread_only: bool = False,
+        type: str | None = None,
+        severity: str | None = None,
         limit: int = 50,
         offset: int = 0,
         context: TenantContext = Depends(require_context),
@@ -992,6 +1387,12 @@ def create_app(*, database_url: str | None = None, service: SaaSService | None =
         unread = " AND read_at IS NULL" if unread_only else ""
         values = [context.tenant_id, context.user_id]
         where = f"tenant_id = ? AND (user_id IS NULL OR user_id = ?){unread}"
+        if type:
+            where += " AND type = ?"
+            values.append(type)
+        if severity:
+            where += " AND severity = ?"
+            values.append(severity)
         total_row = svc.storage.query_one(f"SELECT COUNT(*) AS count FROM notifications WHERE {where}", values)
         total = int(total_row["count"] if total_row else 0)
         items = svc.storage.query_all(f"SELECT * FROM notifications WHERE {where} ORDER BY created_at DESC LIMIT ? OFFSET ?", [*values, safe_limit, safe_offset])
@@ -1012,11 +1413,39 @@ def create_app(*, database_url: str | None = None, service: SaaSService | None =
 
     @app.post("/api/notifications/read-all")
     def read_all_notifications(context: TenantContext = Depends(require_context), svc: SaaSService = Depends(get_service)) -> dict[str, int]:
+        before = svc.storage.query_one(
+            "SELECT COUNT(*) AS count FROM notifications WHERE tenant_id = ? AND (user_id IS NULL OR user_id = ?) AND read_at IS NULL",
+            [context.tenant_id, context.user_id],
+        )
         svc.storage.execute(
             "UPDATE notifications SET read_at = ? WHERE tenant_id = ? AND (user_id IS NULL OR user_id = ?) AND read_at IS NULL",
             [utc_now(), context.tenant_id, context.user_id],
         )
-        return {"updated": 1}
+        return {"updated": int(before["count"] if before else 0), "unread_count": 0}
+
+    @app.delete("/api/notifications/{notification_id}", status_code=204)
+    def delete_notification(notification_id: str, context: TenantContext = Depends(require_context), svc: SaaSService = Depends(get_service)) -> Response:
+        notification = svc.storage.get_by_id("notifications", notification_id, tenant_id=context.tenant_id)
+        if not notification or notification.get("user_id") not in {None, context.user_id}:
+            raise HTTPException(status_code=404, detail="not found")
+        svc.storage.delete_by_id("notifications", notification_id, tenant_id=context.tenant_id)
+        return Response(status_code=204)
+
+    @app.post("/api/notifications/clear-read")
+    def clear_read_notifications(context: TenantContext = Depends(require_context), svc: SaaSService = Depends(get_service)) -> dict[str, int]:
+        before = svc.storage.query_one(
+            "SELECT COUNT(*) AS count FROM notifications WHERE tenant_id = ? AND (user_id IS NULL OR user_id = ?) AND read_at IS NOT NULL",
+            [context.tenant_id, context.user_id],
+        )
+        svc.storage.execute(
+            "DELETE FROM notifications WHERE tenant_id = ? AND (user_id IS NULL OR user_id = ?) AND read_at IS NOT NULL",
+            [context.tenant_id, context.user_id],
+        )
+        unread = svc.storage.query_one(
+            "SELECT COUNT(*) AS count FROM notifications WHERE tenant_id = ? AND (user_id IS NULL OR user_id = ?) AND read_at IS NULL",
+            [context.tenant_id, context.user_id],
+        )
+        return {"deleted": int(before["count"] if before else 0), "unread_count": int(unread["count"] if unread else 0)}
 
     @app.get("/api/admin/tenants")
     def admin_tenants(
@@ -1058,6 +1487,70 @@ def create_app(*, database_url: str | None = None, service: SaaSService | None =
     def admin_system_usage(context: TenantContext = Depends(require_context), svc: SaaSService = Depends(get_service)) -> dict[str, Any]:
         return svc.system_admin.system_usage(context.user_id)
 
+    @app.get("/api/admin/users")
+    def admin_users(limit: int = 20, offset: int = 0, context: TenantContext = Depends(require_context), svc: SaaSService = Depends(get_service)) -> dict[str, Any]:
+        svc.system_admin.require(context.user_id)
+        safe_limit, safe_offset = min(max(limit, 1), 200), max(offset, 0)
+        items = [_public_api_user(row) for row in svc.storage.list("users", limit=safe_limit, offset=safe_offset)]
+        return {"items": items, "limit": safe_limit, "offset": safe_offset, "total": svc.storage.count("users")}
+
+    @app.get("/api/admin/users/{user_id}")
+    def admin_user_detail(user_id: str, context: TenantContext = Depends(require_context), svc: SaaSService = Depends(get_service)) -> dict[str, Any]:
+        svc.system_admin.require(context.user_id)
+        user = svc.storage.get_by_id("users", user_id)
+        if not user:
+            raise HTTPException(status_code=404, detail="not found")
+        memberships = svc.storage.list("tenant_users", filters={"user_id": user_id}, limit=200)
+        sessions = svc.storage.query_all(
+            "SELECT id, tenant_id, expires_at, last_seen_at, revoked_at, created_at FROM sessions WHERE user_id = ? ORDER BY created_at DESC LIMIT ?",
+            [user_id, 20],
+        )
+        return {"user": _public_api_user(user), "memberships": memberships, "sessions": sessions}
+
+    @app.get("/api/admin/system/health")
+    def admin_system_health(context: TenantContext = Depends(require_context), svc: SaaSService = Depends(get_service)) -> dict[str, Any]:
+        svc.system_admin.require(context.user_id)
+        return {
+            "api": {"status": "ok"},
+            "postgres": {"status": "ok" if svc.storage.ping() else "error"},
+            "worker": worker_status(context=context, svc=svc),
+            "scheduler": scheduler_status(context=context, svc=svc),
+            "queue": svc.storage.queue_counts(tenant_id=context.tenant_id),
+            "browser_runtimes": {"count": svc.storage.count("browser_runtimes")},
+        }
+
+    @app.get("/api/admin/system/runtimes")
+    def admin_system_runtimes(limit: int = 20, offset: int = 0, context: TenantContext = Depends(require_context), svc: SaaSService = Depends(get_service)) -> dict[str, Any]:
+        svc.system_admin.require(context.user_id)
+        safe_limit, safe_offset = min(max(limit, 1), 200), max(offset, 0)
+        rows = svc.storage.list("browser_runtimes", limit=safe_limit, offset=safe_offset)
+        for row in rows:
+            row.pop("profile_path", None)
+            row.pop("cdp_url", None)
+        return {"items": rows, "limit": safe_limit, "offset": safe_offset, "total": svc.storage.count("browser_runtimes")}
+
+    @app.get("/api/admin/system/queue")
+    def admin_system_queue(limit: int = 20, offset: int = 0, context: TenantContext = Depends(require_context), svc: SaaSService = Depends(get_service)) -> dict[str, Any]:
+        svc.system_admin.require(context.user_id)
+        safe_limit, safe_offset = min(max(limit, 1), 200), max(offset, 0)
+        return {
+            "items": svc.storage.list("execution_queue_items", limit=safe_limit, offset=safe_offset),
+            "limit": safe_limit,
+            "offset": safe_offset,
+            "total": svc.storage.count("execution_queue_items"),
+        }
+
+    @app.get("/api/admin/audit-logs")
+    def admin_audit_logs(limit: int = 20, offset: int = 0, context: TenantContext = Depends(require_context), svc: SaaSService = Depends(get_service)) -> dict[str, Any]:
+        svc.system_admin.require(context.user_id)
+        safe_limit, safe_offset = min(max(limit, 1), 200), max(offset, 0)
+        return {
+            "items": svc.storage.list("audit_logs", limit=safe_limit, offset=safe_offset),
+            "limit": safe_limit,
+            "offset": safe_offset,
+            "total": svc.storage.count("audit_logs"),
+        }
+
     app.include_router(auth_router)
     app.include_router(platform_accounts_router)
     app.include_router(campaigns_router)
@@ -1095,3 +1588,13 @@ def _as_utc_datetime(value: Any) -> datetime:
         return value.replace(tzinfo=timezone.utc) if value.tzinfo is None else value
     parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
     return parsed.replace(tzinfo=timezone.utc) if parsed.tzinfo is None else parsed
+
+
+def _csv_cell(value: Any) -> str:
+    text = "" if value is None else str(value)
+    escaped = text.replace('"', '""')
+    return f'"{escaped}"' if any(ch in escaped for ch in [",", "\n", '"']) else escaped
+
+
+def _public_api_user(user: dict[str, Any]) -> dict[str, Any]:
+    return {key: value for key, value in user.items() if key not in {"password_hash"}}

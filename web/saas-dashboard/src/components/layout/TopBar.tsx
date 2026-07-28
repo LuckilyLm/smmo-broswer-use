@@ -1,174 +1,139 @@
-import { useState } from 'react'
-import { Search, Bell, Globe, ChevronDown, RefreshCw, Plus, Menu, X } from 'lucide-react'
+import { useTranslation } from "react-i18next";
+import { useNavigate } from "react-router-dom";
+import {
+  Bell,
+  Building2,
+  ChevronDown,
+  Globe,
+  LogOut,
+  Menu,
+  Settings,
+} from "lucide-react";
+import { useAuth } from "../../auth/AuthProvider";
+import { useWorkspace } from "../../workspace/WorkspaceProvider";
+import { setAppLocale, type AppLocale } from "../../i18n";
+import { useNotifications } from "../../api/notifications";
+import { Avatar, AvatarFallback } from "@/components/ui/avatar";
+import { Button } from "@/components/ui/button";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 
 interface TopBarProps {
-  breadcrumbs: string[]
-  onRefresh?: () => void
-  onCreateCampaign?: () => void
-  showCreateCampaign?: boolean
-  onMenuOpen?: () => void
-  pageTitle?: string
+  onMenuOpen: () => void;
 }
 
-export default function TopBar({
-  breadcrumbs, onRefresh, onCreateCampaign, showCreateCampaign,
-  onMenuOpen, pageTitle
-}: TopBarProps) {
-  const [lang, setLang] = useState<'zh' | 'en'>('zh')
-  const [notifOpen, setNotifOpen] = useState(false)
-  const [searchOpen, setSearchOpen] = useState(false)
+export default function TopBar({ onMenuOpen }: TopBarProps) {
+  const navigate = useNavigate();
+  const { i18n } = useTranslation();
+  const { user, logout } = useAuth();
+  const { currentTenant, availableTenants, switchTenant } = useWorkspace();
+  const { data: notifications } = useNotifications(true, 5);
 
-  const title = pageTitle || breadcrumbs[breadcrumbs.length - 1] || ''
+  const locale: AppLocale = i18n.language.startsWith("zh") ? "zh-CN" : "en-US";
+  const userInitial = user?.display_name?.[0] || user?.email?.[0] || "?";
+  const unreadCount = notifications?.unread_count || 0;
+
+  const handleLogout = async () => {
+    await logout();
+    navigate("/login");
+  };
 
   return (
-    <header
-      className="flex items-center gap-2 px-3 md:px-6 border-b bg-white sticky top-0 z-30 shrink-0"
-      style={{ height: 52, borderColor: 'var(--border)' }}
-    >
-      {/* Mobile: hamburger + title */}
-      <button
-        className="md:hidden flex items-center justify-center rounded-lg hover:bg-gray-100 text-gray-500 shrink-0"
-        style={{ minWidth: 44, minHeight: 44 }}
-        onClick={onMenuOpen}
-      >
-        <Menu size={18} />
-      </button>
-      <span className="md:hidden text-sm font-semibold text-gray-900 truncate flex-1 min-w-0">{title}</span>
-
-      {/* Desktop: breadcrumbs */}
-      <nav className="hidden md:flex items-center gap-1.5 text-sm flex-1 min-w-0">
-        {breadcrumbs.map((crumb, i) => (
-          <span key={crumb} className="flex items-center gap-1.5 min-w-0">
-            {i > 0 && <span className="text-gray-300 shrink-0">/</span>}
-            <span className={`truncate ${i === breadcrumbs.length - 1 ? 'font-medium text-gray-800' : 'text-gray-400'}`}>
-              {crumb}
-            </span>
-          </span>
-        ))}
-      </nav>
-
-      {/* Mobile search expand */}
-      {searchOpen && (
-        <div className="md:hidden absolute inset-x-0 top-0 h-full bg-white flex items-center px-3 gap-2 z-40" style={{ borderBottom: '1px solid var(--border)' }}>
-          <Search size={14} className="text-gray-400 shrink-0" />
-          <input
-            type="text"
-            placeholder="搜索..."
-            autoFocus
-            className="flex-1 text-sm focus:outline-none"
-          />
-          <button
-            className="p-2 text-gray-400"
-            style={{ minWidth: 44, minHeight: 44 }}
-            onClick={() => setSearchOpen(false)}
-          >
-            <X size={16} />
-          </button>
+    <header className="relative z-30 flex h-16 shrink-0 items-center border-b bg-card/95 backdrop-blur">
+      <div className="hidden h-full w-[220px] shrink-0 items-center overflow-hidden border-r px-4 md:flex">
+        <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-primary text-sm font-bold text-primary-foreground shadow-sm">
+          SM
         </div>
-      )}
-
-      {/* Desktop search */}
-      <div className="relative hidden md:block">
-        <Search size={14} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-gray-400" />
-        <input
-          type="text"
-          placeholder="搜索..."
-          className="pl-8 pr-3 py-1.5 text-sm border rounded-lg bg-gray-50 focus:outline-none focus:ring-1"
-          style={{ width: 200, borderColor: 'var(--border)' }}
-        />
       </div>
 
-      {/* Mobile search icon */}
-      <button
-        className="md:hidden flex items-center justify-center text-gray-500 shrink-0"
-        style={{ minWidth: 44, minHeight: 44 }}
-        onClick={() => setSearchOpen(true)}
+      <div className="flex min-w-0 flex-1 items-center justify-end gap-2 px-3 md:px-6">
+      <Button
+        variant="ghost"
+        size="icon"
+        className="md:hidden"
+        onClick={onMenuOpen}
+        aria-label="打开导航菜单"
       >
-        <Search size={16} />
-      </button>
+        <Menu className="h-5 w-5" />
+      </Button>
 
-      {/* Notifications */}
-      <div className="relative">
-        <button
-          className="relative flex items-center justify-center rounded-lg hover:bg-gray-100 transition-colors shrink-0"
-          style={{ minWidth: 44, minHeight: 44 }}
-          onClick={() => setNotifOpen(!notifOpen)}
-        >
-          <Bell size={16} className="text-gray-500" />
-          <span className="absolute top-2 right-2 w-1.5 h-1.5 rounded-full bg-red-500" />
-        </button>
-        {notifOpen && (
-          <>
-            <div className="fixed inset-0 z-40" onClick={() => setNotifOpen(false)} />
-            <div
-              className="absolute right-0 top-full mt-1 w-80 max-w-[calc(100vw-16px)] bg-white border rounded-xl shadow-lg z-50"
-              style={{ borderColor: 'var(--border)' }}
-            >
-              <div className="px-4 py-3 border-b flex items-center justify-between" style={{ borderColor: 'var(--border)' }}>
-                <span className="font-semibold text-sm">通知中心</span>
-                <span className="text-xs text-indigo-600 cursor-pointer">全部标为已读</span>
-              </div>
-              <div className="py-2 max-h-72 overflow-y-auto">
-                {[
-                  { title: '2 个回复计划待审批', time: '5 分钟前', dot: '#4338ca' },
-                  { title: '营销活动「跨境电商引流」执行异常', time: '1 小时前', dot: '#ef4444' },
-                  { title: '今日扫描完成：1,284 条评论', time: '2 小时前', dot: '#10b981' },
-                ].map((n, i) => (
-                  <div key={i} className="px-4 py-2.5 hover:bg-gray-50 flex gap-3 cursor-pointer" style={{ minHeight: 44 }}>
-                    <span className="w-2 h-2 rounded-full shrink-0 mt-1.5" style={{ background: n.dot }} />
-                    <div>
-                      <div className="text-sm text-gray-800">{n.title}</div>
-                      <div className="text-xs text-gray-400 mt-0.5">{n.time}</div>
-                    </div>
-                  </div>
-                ))}
-              </div>
-            </div>
-          </>
+      <div className="min-w-0 flex-1" />
+
+      <div className="hidden w-64 min-w-0 md:block">
+        <DropdownMenu>
+          <DropdownMenuTrigger>
+            <Button variant="outline" className="h-10 w-full min-w-0 justify-start gap-2 px-3">
+              <Building2 className="h-4 w-4 shrink-0 text-muted-foreground" />
+              <span className="min-w-0 flex-1 truncate text-left font-medium">{currentTenant?.name || "加载中..."}</span>
+              <ChevronDown className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+            </Button>
+          </DropdownMenuTrigger>
+          <DropdownMenuContent align="end" className="w-64">
+            {availableTenants.map((tenant: { id: string; name: string }) => (
+              <DropdownMenuItem key={tenant.id} onClick={() => switchTenant(tenant.id)}>
+                <Building2 className="mr-2 h-4 w-4 text-muted-foreground" />
+                <span className="flex-1 truncate">{tenant.name}</span>
+                {tenant.id === currentTenant?.id && <span className="h-2 w-2 rounded-full bg-primary" />}
+              </DropdownMenuItem>
+            ))}
+          </DropdownMenuContent>
+        </DropdownMenu>
+      </div>
+
+      <Button variant="ghost" size="icon" className="relative" onClick={() => navigate("/notifications")} aria-label="通知中心">
+        <Bell className="h-4 w-4 text-muted-foreground" />
+        {unreadCount > 0 && (
+          <span className="absolute right-2 top-2 h-2 w-2 rounded-full bg-destructive ring-2 ring-card" />
         )}
-      </div>
+      </Button>
 
-      {/* Language - desktop only */}
-      <button
-        className="hidden md:flex items-center gap-1 px-2.5 py-1.5 text-xs border rounded-lg hover:bg-gray-50 transition-colors shrink-0"
-        style={{ borderColor: 'var(--border)', color: '#374151' }}
-        onClick={() => setLang(lang === 'zh' ? 'en' : 'zh')}
-      >
-        <Globe size={13} />
-        {lang === 'zh' ? '中文' : 'EN'}
-        <ChevronDown size={11} className="text-gray-400" />
-      </button>
+      <DropdownMenu>
+        <DropdownMenuTrigger>
+          <Button variant="outline" className="hidden h-9 gap-1.5 px-3 md:flex">
+            <Globe className="h-4 w-4" />
+            {locale === "zh-CN" ? "中文" : "EN"}
+            <ChevronDown className="h-3 w-3 text-muted-foreground" />
+          </Button>
+        </DropdownMenuTrigger>
+        <DropdownMenuContent align="end">
+          <DropdownMenuItem onClick={() => setAppLocale("zh-CN")}>中文</DropdownMenuItem>
+          <DropdownMenuItem onClick={() => setAppLocale("en-US")}>English</DropdownMenuItem>
+        </DropdownMenuContent>
+      </DropdownMenu>
 
-      {/* Refresh - desktop only */}
-      {onRefresh && (
-        <button
-          className="hidden md:flex items-center justify-center rounded-lg border hover:bg-gray-50 transition-colors shrink-0"
-          style={{ width: 34, height: 34, borderColor: 'var(--border)' }}
-          onClick={onRefresh}
-        >
-          <RefreshCw size={14} className="text-gray-500" />
-        </button>
-      )}
-
-      {/* Create campaign - desktop only */}
-      {showCreateCampaign && onCreateCampaign && (
-        <button
-          className="hidden md:flex items-center gap-1.5 px-3 py-1.5 text-sm font-medium rounded-lg text-white hover:opacity-90 shrink-0"
-          style={{ background: 'var(--primary)' }}
-          onClick={onCreateCampaign}
-        >
-          <Plus size={14} />
-          新建活动
-        </button>
-      )}
-
-      {/* User avatar */}
-      <div
-        className="rounded-full flex items-center justify-center text-white text-xs font-semibold cursor-pointer shrink-0"
-        style={{ width: 28, height: 28, minWidth: 28, background: 'var(--primary)' }}
-      >
-        王
+      <DropdownMenu>
+        <DropdownMenuTrigger>
+          <Button variant="ghost" size="icon" className="rounded-full">
+            <Avatar className="h-8 w-8">
+              <AvatarFallback className="bg-primary text-xs font-semibold text-primary-foreground">
+                {userInitial}
+              </AvatarFallback>
+            </Avatar>
+          </Button>
+        </DropdownMenuTrigger>
+        <DropdownMenuContent align="end" className="w-52">
+          <div className="px-2 py-1.5">
+            <p className="truncate text-sm font-medium">{user?.display_name || "用户"}</p>
+            <p className="truncate text-xs text-muted-foreground">{user?.email}</p>
+          </div>
+          <DropdownMenuSeparator />
+          <DropdownMenuItem onClick={() => navigate("/settings")}>
+            <Settings className="mr-2 h-4 w-4" />
+            设置
+          </DropdownMenuItem>
+          <DropdownMenuSeparator />
+          <DropdownMenuItem onClick={handleLogout} className="text-destructive focus:text-destructive">
+            <LogOut className="mr-2 h-4 w-4" />
+            退出登录
+          </DropdownMenuItem>
+        </DropdownMenuContent>
+      </DropdownMenu>
       </div>
     </header>
-  )
+  );
 }

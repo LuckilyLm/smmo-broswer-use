@@ -1,67 +1,113 @@
-import { useState } from 'react'
-import Sidebar from './components/layout/Sidebar'
-import Dashboard from './pages/Dashboard'
-import Campaigns from './pages/Campaigns'
-import CampaignSettings from './pages/CampaignSettings'
-import ReplyTemplates from './pages/ReplyTemplates'
-import MatchingRules from './pages/MatchingRules'
-import ReplyTasks from './pages/ReplyTasks'
-import ReplyRecords from './pages/ReplyRecords'
-import LeadsInbox from './pages/LeadsInbox'
-import PlatformAccounts from './pages/PlatformAccounts'
-import ExecutionRecords from './pages/ExecutionRecords'
-import Settings from './pages/Settings'
-import Keywords from './pages/Keywords'
-import TokenUsage from './pages/TokenUsage'
-import Members from './pages/Members'
-import AuditLog from './pages/AuditLog'
-import NotificationCenter from './pages/NotificationCenter'
-import SystemAdmin from './pages/SystemAdmin'
+import { useState } from "react";
+import { QueryClientProvider } from "@tanstack/react-query";
+import { Toaster } from "sonner";
+import { BrowserRouter, Routes, Route, Navigate, useLocation } from "react-router-dom";
+import { queryClient } from "./lib/query-client";
+import { AuthProvider } from "./auth/AuthProvider";
+import { WorkspaceProvider } from "./workspace/WorkspaceProvider";
+import { RequireAuth } from "./auth/RequireAuth";
+import { RequireSystemAdmin } from "./auth/RequireSystemAdmin";
 
-export default function App() {
-  const [activePage, setActivePage] = useState('dashboard')
-  const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false)
+// Import all pages
+import Sidebar from "./components/layout/Sidebar";
+import TopBar from "./components/layout/TopBar";
+import Dashboard from "./pages/Dashboard";
+import Campaigns from "./pages/Campaigns";
+import CampaignSettings from "./pages/CampaignSettings";
+import ReplyTemplates from "./pages/ReplyTemplates";
+import MatchingRules from "./pages/MatchingRules";
+import ReplyTasks from "./pages/ReplyTasks";
+import ReplyRecords from "./pages/ReplyRecords";
+import LeadsInbox from "./pages/LeadsInbox";
+import PlatformAccounts from "./pages/PlatformAccounts";
+import ExecutionRecords from "./pages/ExecutionRecords";
+import Settings from "./pages/Settings";
+import Keywords from "./pages/Keywords";
+import TokenUsage from "./pages/TokenUsage";
+import Members from "./pages/Members";
+import AuditLog from "./pages/AuditLog";
+import NotificationCenter from "./pages/NotificationCenter";
+import SystemAdmin from "./pages/SystemAdmin";
+import LoginPage from "./pages/LoginPage";
+import InvitationPage from "./pages/InvitationPage";
+import ChangePasswordPage from "./pages/ChangePasswordPage";
 
-  const navigate = (page: string) => {
-    setActivePage(page)
-    setMobileSidebarOpen(false)
-  }
+function AppContent() {
+  const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
+  const location = useLocation();
 
-  const renderPage = () => {
-    const menuProps = { onMenuOpen: () => setMobileSidebarOpen(true) }
-    switch (activePage) {
-      case 'dashboard': return <Dashboard onNavigate={navigate} {...menuProps} />
-      case 'campaigns': return <Campaigns onNavigate={navigate} {...menuProps} />
-      case 'campaign-settings': return <CampaignSettings onNavigate={navigate} {...menuProps} />
-      case 'reply-templates': return <ReplyTemplates {...menuProps} />
-      case 'matching-rules': return <MatchingRules {...menuProps} />
-      case 'reply-tasks': return <ReplyTasks {...menuProps} />
-      case 'reply-records': return <ReplyRecords {...menuProps} />
-      case 'leads-inbox': return <LeadsInbox {...menuProps} />
-      case 'platform-accounts': return <PlatformAccounts {...menuProps} />
-      case 'execution-records': return <ExecutionRecords {...menuProps} />
-      case 'settings': return <Settings {...menuProps} />
-      case 'keywords': return <Keywords {...menuProps} />
-      case 'token-usage': return <TokenUsage {...menuProps} />
-      case 'members': return <Members {...menuProps} />
-      case 'audit-log': return <AuditLog {...menuProps} />
-      case 'notifications': return <NotificationCenter onNavigate={navigate} {...menuProps} />
-      case 'system-admin': return <SystemAdmin {...menuProps} />
-      default: return <Dashboard onNavigate={navigate} {...menuProps} />
-    }
+  const isAuthPage = location.pathname === "/login" || location.pathname.startsWith("/invitations/") || location.pathname === "/change-password";
+
+  if (isAuthPage) {
+    return (
+      <Routes>
+        <Route path="/login" element={<LoginPage />} />
+        <Route path="/change-password" element={<ChangePasswordPage />} />
+        <Route path="/invitations/:token" element={<InvitationPage />} />
+      </Routes>
+    );
   }
 
   return (
-    <div className="flex h-screen overflow-hidden bg-background">
-      <Sidebar
-        activePage={activePage}
-        onNavigate={navigate}
-        mobileOpen={mobileSidebarOpen}
-        onMobileClose={() => setMobileSidebarOpen(false)}
-      />
-      <main className="flex-1 overflow-y-auto min-w-0">
-        {renderPage()}
-      </main>
-    </div>
-  )
+    <RequireAuth>
+      <div className="flex h-dvh min-h-0 flex-col overflow-hidden bg-background">
+        <TopBar onMenuOpen={() => setMobileSidebarOpen(true)} />
+        <div className="flex min-h-0 flex-1 overflow-hidden">
+          <Sidebar
+            mobileOpen={mobileSidebarOpen}
+            onMobileClose={() => setMobileSidebarOpen(false)}
+          />
+          <main data-testid="app-main-scroll" className="min-h-0 min-w-0 flex-1 overflow-y-auto overscroll-contain">
+            <Routes>
+              <Route path="/" element={<Navigate to="/dashboard" replace />} />
+              <Route path="/dashboard" element={<Dashboard />} />
+              <Route path="/campaigns" element={<Campaigns />} />
+              <Route path="/campaigns/new" element={<CampaignSettings />} />
+              <Route path="/campaigns/:campaignId" element={<CampaignSettings />} />
+              <Route path="/platform-accounts" element={<PlatformAccounts />} />
+              <Route path="/keywords" element={<Keywords />} />
+              <Route path="/leads" element={<LeadsInbox />} />
+              <Route path="/leads-inbox" element={<LeadsInbox />} />
+              <Route path="/reply-templates" element={<ReplyTemplates />} />
+              <Route path="/reply-rules" element={<MatchingRules />} />
+              <Route path="/matching-rules" element={<MatchingRules />} />
+              <Route path="/reply-tasks" element={<ReplyTasks />} />
+              <Route path="/reply-records" element={<ReplyRecords />} />
+              <Route path="/executions" element={<ExecutionRecords />} />
+              <Route path="/execution-records" element={<ExecutionRecords />} />
+              <Route path="/token-usage" element={<TokenUsage />} />
+              <Route path="/members" element={<Members />} />
+              <Route path="/audit-logs" element={<AuditLog />} />
+              <Route path="/notifications" element={<NotificationCenter />} />
+              <Route path="/settings" element={<Settings />} />
+              <Route
+                path="/system-admin"
+                element={
+                  <RequireSystemAdmin>
+                    <SystemAdmin />
+                  </RequireSystemAdmin>
+                }
+              />
+              <Route path="*" element={<Navigate to="/dashboard" replace />} />
+            </Routes>
+          </main>
+        </div>
+      </div>
+    </RequireAuth>
+  );
+}
+
+export default function App() {
+  return (
+    <QueryClientProvider client={queryClient}>
+      <BrowserRouter>
+        <AuthProvider>
+          <WorkspaceProvider>
+            <AppContent />
+            <Toaster position="top-right" richColors />
+          </WorkspaceProvider>
+        </AuthProvider>
+      </BrowserRouter>
+    </QueryClientProvider>
+  );
 }

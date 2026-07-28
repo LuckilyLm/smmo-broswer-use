@@ -1,6 +1,6 @@
 import { useState } from 'react'
-import { Plus, Search, MoreHorizontal, UserPlus, Mail, X, AlertTriangle, CheckCircle } from 'lucide-react'
-import TopBar from '../components/layout/TopBar'
+import { Search, MoreHorizontal, UserPlus, Mail, X, AlertTriangle } from 'lucide-react'
+
 import StatusBadge from '../components/ui/StatusBadge'
 import ConfirmModal from '../components/ui/ConfirmModal'
 
@@ -46,7 +46,7 @@ function InviteDrawer({ onClose, onInvite }: InviteDrawerProps) {
   }
 
   return (
-    <div className="fixed inset-0 md:inset-y-0 md:right-0 md:left-auto z-50 flex flex-col bg-white md:w-[400px] shadow-xl border-l" style={{ borderColor: 'var(--border)' }}>
+    <div className="fixed inset-0 min-h-0 overflow-hidden md:inset-y-0 md:right-0 md:left-auto z-50 flex flex-col bg-white md:w-[400px] shadow-xl border-l" style={{ borderColor: 'var(--border)' }}>
       <div className="flex items-center justify-between px-5 py-4 border-b shrink-0" style={{ borderColor: 'var(--border)' }}>
         <h3 className="font-semibold text-gray-900">邀请成员</h3>
         <button className="p-2 text-gray-400 hover:text-gray-600" onClick={onClose} style={{ minHeight: 44, minWidth: 44 }}><X size={16} /></button>
@@ -126,8 +126,7 @@ export default function Members({ onMenuOpen }: { onMenuOpen?: () => void }) {
   })
 
   return (
-    <div className="flex flex-col min-h-screen">
-      <TopBar breadcrumbs={['组织管理', '成员管理']} pageTitle="成员管理" onMenuOpen={onMenuOpen} />
+    <div className="flex min-h-full flex-col">
       <div className="flex-1 p-4 md:p-6 flex flex-col gap-4">
         <div className="flex items-center justify-between gap-2 flex-wrap">
           <div>

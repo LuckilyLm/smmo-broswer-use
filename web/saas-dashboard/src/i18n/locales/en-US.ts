@@ -471,9 +471,8 @@ export const enUS = {
       unknown: "Unknown"
     },
     runtimeType: {
-      local: "Local runtime",
-      local_chrome_cdp: "Local browser",
-      windows_host: "Windows Runtime Host",
+      local: "Container runtime",
+      browser_use_chromium_cdp: "browser-use Chromium",
       unknown: "Unknown"
     },
     auditResource: {

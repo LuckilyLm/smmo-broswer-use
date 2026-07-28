@@ -1,5 +1,6 @@
 interface StatusBadgeProps {
   status: string
+  label?: string
   variant?: 'default' | 'dot'
 }
 
@@ -44,7 +45,7 @@ const statusConfig: Record<string, { bg: string; text: string; dot: string }> = 
   'unknown': { bg: '#f3f4f6', text: '#9ca3af', dot: '#d1d5db' },
 }
 
-export default function StatusBadge({ status, variant = 'default' }: StatusBadgeProps) {
+export default function StatusBadge({ status, label, variant = 'default' }: StatusBadgeProps) {
   const config = statusConfig[status] ?? { bg: '#f3f4f6', text: '#374151', dot: '#9ca3af' }
   return (
     <span
@@ -54,7 +55,7 @@ export default function StatusBadge({ status, variant = 'default' }: StatusBadge
       {variant === 'dot' && (
         <span className="w-1.5 h-1.5 rounded-full shrink-0" style={{ background: config.dot }} />
       )}
-      {status}
+      {label || status}
     </span>
   )
 }

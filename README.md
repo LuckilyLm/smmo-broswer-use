@@ -20,7 +20,7 @@ The repository includes a multi-tenant Facebook lead discovery service under `sr
 
 Safety is fixed for this phase: every scheduler and worker execution uses `send_disabled=true`. The system may scan, analyze, build a reply plan, and persist leads, but it does not execute the plan or send a Facebook reply.
 
-Production intent is explicit through `SAAS_DEPLOYMENT_MODE`. Use `windows-local` only when API, Worker, Browser Runtime, and Chrome share one Windows host. The Docker production stack defaults to `control-plane-only`, where browser runtime operations and Campaign execution fail explicitly instead of attempting container-local CDP.
+Production intent is explicit through `SAAS_DEPLOYMENT_MODE`. Use `browser-use` for the Linux Docker stack where API, Worker, Browser Runtime, Chromium, PostgreSQL, and the frontend run together. Use `control-plane-only` only when browser runtime operations and Campaign execution should fail explicitly.
 
 ### Local setup
 
@@ -53,7 +53,7 @@ Production intent is explicit through `SAAS_DEPLOYMENT_MODE`. Use `windows-local
    npm run dev
    ```
 
-The dashboard is available at `http://127.0.0.1:5173`; the API listens on `http://127.0.0.1:8000`. Set `SAAS_CHROME_EXECUTABLE` when Chrome cannot be discovered automatically. Each connected platform account receives a separate profile and CDP port from the configured `SAAS_BROWSER_CDP_PORT_START` to `SAAS_BROWSER_CDP_PORT_END` range.
+The dashboard is available at `http://127.0.0.1:5173`; the API listens on `http://127.0.0.1:8000`. Each connected platform account receives a separate profile and CDP port from the configured `SAAS_BROWSER_CDP_PORT_START` to `SAAS_BROWSER_CDP_PORT_END` range.
 
 Browser sessions use an HttpOnly, SameSite cookie; Bearer tokens remain supported for API clients. Set `SAAS_COOKIE_SECURE=true` when the API is served over HTTPS.
 
@@ -203,13 +203,9 @@ TARGETPLATFORM=linux/arm64 docker compose up --build
 
 ## Browser Runtime Deployment Boundary
 
-The SaaS control plane can run PostgreSQL, migrations, Nginx/frontend, and non-browser API operations in Docker. The current Facebook runtime cannot control a Windows Chrome process through container-local `localhost`: `SAAS_RUNTIME_HOST=local` inside Linux means Linux-container-local, not the Windows host.
-
-For the currently supported real-browser topology, run the API, Worker, Browser Runtime, and Chrome on the Windows host against the same PostgreSQL database. Scheduler may run on Docker or Windows only after a Windows Worker is online. `windows-agent` is a guarded future boundary and returns `501 not_implemented` for runtime controls; no remote runtime agent exists yet. The production Compose file therefore starts the control plane only by default and does not claim that Facebook browser automation is available after `docker compose up`.
+The SaaS stack runs browser automation inside Linux Docker through browser-use and container-local Chromium. PostgreSQL, migrations, Nginx/frontend, API, Worker, Scheduler, and Browser Runtime share the same Docker deployment boundary.
 
 Every SaaS execution remains analysis-only with `send_disabled=true`; no deployment path executes reply batch commands.
-
-For the supported Windows host browser topology, Docker control plane, and validation steps, see the [Windows-local SaaS deployment guide](docs/windows-local-deployment.md).
 
 ## Changelog
 - [x] **2025/01/26:** Thanks to @vvincent1234. Now browser-use-webui can combine with DeepSeek-r1 to engage in deep thinking!

@@ -1,6 +1,12 @@
-import { useState } from 'react'
-import { Save, X, AlertTriangle, ChevronRight, Info, Plus, Trash2, CheckCircle, Loader2 } from 'lucide-react'
-import TopBar from '../components/layout/TopBar'
+import { useEffect, useState } from 'react'
+import { useNavigate } from 'react-router-dom'
+import { useParams } from 'react-router-dom'
+import { AlertTriangle, ChevronRight, Plus, Trash2 } from 'lucide-react'
+import { useCampaign, useCreateCampaign, useUpdateCampaign, type CampaignPayload } from '../api/campaigns'
+import { usePlatformAccounts } from '../api/platform-accounts'
+import { useReplyTemplates } from '../api/reply-templates'
+import StickySaveBar, { type SaveState } from '../components/ui/StickySaveBar'
+
 
 const sections = [
   { id: 'basic', label: '基础信息' },
@@ -14,23 +20,30 @@ const sections = [
   { id: 'schedule', label: '调度设置' },
 ]
 
-type SaveState = 'idle' | 'saving' | 'success' | 'error'
-
 interface CampaignSettingsProps {
-  onNavigate: (page: string) => void
+  onNavigate?: (page: string) => void
   onMenuOpen?: () => void
 }
 
-export default function CampaignSettings({ onNavigate, onMenuOpen }: CampaignSettingsProps) {
+export default function CampaignSettings({ onNavigate }: CampaignSettingsProps) {
+  const navigate = useNavigate()
+  const { campaignId } = useParams()
+  const { data: platformAccounts = [] } = usePlatformAccounts()
+  const { data: templates = [] } = useReplyTemplates()
+  const { data: campaignDetail } = useCampaign(campaignId || '')
+  const createCampaign = useCreateCampaign()
+  const updateCampaign = useUpdateCampaign()
   const [activeSection, setActiveSection] = useState('basic')
   const [replyMode, setReplyMode] = useState<'off' | 'manual' | 'auto'>('manual')
   const [leadMode, setLeadMode] = useState<'rules' | 'hybrid' | 'ai'>('rules')
   const [llmEnabled, setLlmEnabled] = useState(false)
-  const [hasChanges, setHasChanges] = useState(true)
+  const [hasChanges, setHasChanges] = useState(false)
   const [saveState, setSaveState] = useState<SaveState>('idle')
   const [keywords, setKeywords] = useState(['跨境电商', '独立站', '代购', '海淘', '采购'])
   const [errors, setErrors] = useState<Record<string, string>>({})
   const [navOpen, setNavOpen] = useState(false)
+  const [selectedAccountId, setSelectedAccountId] = useState('')
+  const [selectedTemplateId, setSelectedTemplateId] = useState('')
 
   const [formValues, setFormValues] = useState({
     name: '跨境电商引流 – Facebook',
@@ -46,6 +59,41 @@ export default function CampaignSettings({ onNavigate, onMenuOpen }: CampaignSet
     intervalSecs: '30',
   })
 
+  useEffect(() => {
+    if (!selectedAccountId && platformAccounts.length > 0) {
+      setSelectedAccountId(platformAccounts[0].id)
+    }
+  }, [platformAccounts, selectedAccountId])
+
+  useEffect(() => {
+    if (!selectedTemplateId && templates.length > 0) {
+      setSelectedTemplateId(templates[0].id)
+    }
+  }, [selectedTemplateId, templates])
+
+  useEffect(() => {
+    if (!campaignDetail) return
+    setFormValues({
+      name: campaignDetail.name || '',
+      description: campaignDetail.description || '',
+      region: (campaignDetail.target_regions_json || []).join('、'),
+      whatsapp: campaignDetail.default_whatsapp || '',
+      email: campaignDetail.default_email || '',
+      website: campaignDetail.default_website || '',
+      contact: campaignDetail.default_contact_text || '',
+      dailyLimit: String(campaignDetail.reply_daily_limit || campaignDetail.daily_limit || 30),
+      hourlyLimit: String(campaignDetail.reply_per_hour_limit || 10),
+      minuteLimit: String(campaignDetail.reply_per_minute_limit || 1),
+      intervalSecs: String(campaignDetail.reply_min_interval_seconds || 60),
+    })
+    setSelectedAccountId(campaignDetail.platform_account_id)
+    setKeywords((campaignDetail.keywords || []).map((item: any) => item.keyword).filter(Boolean))
+    setReplyMode(campaignDetail.reply_mode === 'automatic' ? 'auto' : campaignDetail.reply_mode === 'disabled' ? 'off' : 'manual')
+    setLeadMode(campaignDetail.lead_detection_mode === 'rules_with_llm' ? 'hybrid' : 'rules')
+    setLlmEnabled(Boolean(campaignDetail.llm_enabled))
+    setSelectedTemplateId(campaignDetail.default_reply_template_id || '')
+  }, [campaignDetail])
+
   const setField = (key: string, value: string) => {
     setFormValues((prev) => ({ ...prev, [key]: value }))
     setHasChanges(true)
@@ -55,7 +103,8 @@ export default function CampaignSettings({ onNavigate, onMenuOpen }: CampaignSet
   const validate = () => {
     const e: Record<string, string> = {}
     if (!formValues.name.trim()) e.name = '活动名称不能为空'
-    if (keywords.length === 0) e.keywords = '至少需要一个关键词'
+    if (!selectedAccountId && platformAccounts.length === 0) e.account = '请先创建或选择一个平台账号'
+    if (keywords.filter((kw) => kw.trim()).length === 0) e.keywords = '至少需要一个关键词'
     if (formValues.email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(formValues.email)) e.email = '邮箱格式不正确'
     return e
   }
@@ -63,17 +112,57 @@ export default function CampaignSettings({ onNavigate, onMenuOpen }: CampaignSet
   const handleSave = async () => {
     const e = validate()
     if (Object.keys(e).length > 0) { setErrors(e); return }
+    const platformAccountId = selectedAccountId || platformAccounts[0]?.id
+    if (!platformAccountId) {
+      setErrors({ account: '请先创建或选择一个平台账号' })
+      return
+    }
     setSaveState('saving')
-    await new Promise((r) => setTimeout(r, 1200))
-    // Simulate occasional error
-    if (Math.random() < 0.15) {
+    const payload: CampaignPayload = {
+      name: formValues.name.trim(),
+      description: formValues.description.trim() || null,
+      platform_account_id: platformAccountId,
+      status: 'active',
+      target_policy: 'discovery_only',
+      max_contents: 2,
+      max_comments: 30,
+      min_confidence: leadMode === 'rules' ? 0.75 : 0.7,
+      max_leads: 5,
+      daily_limit: Number(formValues.dailyLimit) || 5,
+      llm_enabled: llmEnabled || leadMode === 'hybrid' || leadMode === 'ai',
+      lead_detection_mode: leadMode === 'rules' ? 'rules_only' : 'rules_with_llm',
+      reply_mode: replyMode === 'auto' ? 'automatic' : replyMode === 'manual' ? 'manual_approval' : 'disabled',
+      default_reply_template_id: selectedTemplateId || null,
+      positive_keywords_json: keywords.map((kw) => kw.trim()).filter(Boolean),
+      negative_keywords_json: [],
+      default_whatsapp: formValues.whatsapp.trim() || null,
+      default_email: formValues.email.trim() || null,
+      default_website: formValues.website.trim() || null,
+      default_contact_text: formValues.contact.trim() || null,
+      reply_daily_limit: Number(formValues.dailyLimit) || 30,
+      reply_per_hour_limit: Number(formValues.hourlyLimit) || 10,
+      reply_per_minute_limit: Number(formValues.minuteLimit) || 1,
+      reply_min_interval_seconds: Number(formValues.intervalSecs) || 60,
+      target_regions_json: formValues.region.split(/[、,]/).map((item) => item.trim()).filter(Boolean),
+      content_types_json: ['post_comments', 'video_comments'],
+      content_language: 'any',
+      initial_keywords: keywords.map((kw) => kw.trim()).filter(Boolean),
+    }
+    try {
+      if (campaignId) {
+        const { initial_keywords, ...updatePayload } = payload
+        await updateCampaign.mutateAsync({ id: campaignId, data: updatePayload })
+      } else {
+        await createCampaign.mutateAsync(payload)
+      }
+      setSaveState('success')
+      setHasChanges(false)
+      setTimeout(() => navigate('/campaigns'), 600)
+    } catch {
       setSaveState('error')
       setTimeout(() => setSaveState('idle'), 3000)
       return
     }
-    setSaveState('success')
-    setHasChanges(false)
-    setTimeout(() => setSaveState('idle'), 2000)
   }
 
   const scrollTo = (id: string) => {
@@ -83,11 +172,10 @@ export default function CampaignSettings({ onNavigate, onMenuOpen }: CampaignSet
   }
 
   return (
-    <div className="flex flex-col min-h-screen">
-      <TopBar breadcrumbs={['获客管理', '营销活动', '活动设置']} pageTitle="活动设置" onMenuOpen={onMenuOpen} />
-      <div className="flex-1 flex" style={{ minHeight: 0 }}>
+    <div className="flex h-full min-h-0 overflow-hidden">
+      <div className="flex min-h-0 flex-1">
         {/* Desktop section nav */}
-        <nav className="hidden md:flex flex-col w-48 shrink-0 border-r bg-white py-4 px-2 sticky overflow-y-auto" style={{ borderColor: 'var(--border)', top: 52, height: 'calc(100vh - 52px)' }}>
+        <nav data-scroll-region className="hidden min-h-0 w-60 shrink-0 flex-col overflow-y-auto border-r bg-card px-2 py-4 md:flex">
           {sections.map((s) => (
             <button
               key={s.id}
@@ -106,7 +194,7 @@ export default function CampaignSettings({ onNavigate, onMenuOpen }: CampaignSet
         </nav>
 
         {/* Mobile section nav: select */}
-        <div className="md:hidden w-full sticky top-[52px] z-20 bg-white border-b px-4 py-2" style={{ borderColor: 'var(--border)' }}>
+        <div className="absolute inset-x-0 top-0 z-20 border-b bg-card px-4 py-2 md:hidden">
           <select
             value={activeSection}
             onChange={(e) => scrollTo(e.target.value)}
@@ -118,7 +206,7 @@ export default function CampaignSettings({ onNavigate, onMenuOpen }: CampaignSet
         </div>
 
         {/* Form content */}
-        <div className="flex-1 overflow-y-auto pb-28">
+        <div data-scroll-region className="min-h-0 flex-1 overflow-y-auto overscroll-contain pt-16 md:pt-0">
           <div className="max-w-3xl mx-auto p-4 md:p-8 flex flex-col gap-6 md:gap-8">
 
             <Section id="basic" title="基础信息">
@@ -139,10 +227,18 @@ export default function CampaignSettings({ onNavigate, onMenuOpen }: CampaignSet
                   {['Facebook', 'Instagram', 'TikTok', 'X', 'YouTube'].map((p) => <option key={p}>{p}</option>)}
                 </select>
               </Field>
-              <Field label="绑定账号">
-                <select className={inputClass(false)} onChange={() => setHasChanges(true)}>
-                  <option>@smmo_business（Facebook · 登录有效）</option>
-                  <option>@smmo_official（Instagram · 登录有效）</option>
+              <Field label="绑定账号" required error={errors.account}>
+                <select
+                  className={inputClass(!!errors.account)}
+                  value={selectedAccountId}
+                  onChange={(e) => { setSelectedAccountId(e.target.value); setHasChanges(true) }}
+                >
+                  {platformAccounts.length === 0 && <option value="">暂无平台账号</option>}
+                  {platformAccounts.map((account) => (
+                    <option key={account.id} value={account.id}>
+                      {account.display_name}（{account.platform} · {account.login_status}）
+                    </option>
+                  ))}
                 </select>
               </Field>
             </Section>
@@ -257,9 +353,9 @@ export default function CampaignSettings({ onNavigate, onMenuOpen }: CampaignSet
                 )}
               </Field>
               <Field label="默认回复模板">
-                <select className={inputClass(false)} onChange={() => setHasChanges(true)}>
-                  <option>标准获客模板（中文）</option>
-                  <option>海外通用模板（英文）</option>
+                <select className={inputClass(false)} value={selectedTemplateId} onChange={(e) => { setSelectedTemplateId(e.target.value); setHasChanges(true) }}>
+                  <option value="">不绑定模板</option>
+                  {templates.map((template) => <option key={template.id} value={template.id}>{template.name}</option>)}
                 </select>
               </Field>
               <Field label="可选 LLM 增强" hint="使用 AI 优化回复内容的语气和相关性，默认关闭">
@@ -327,53 +423,14 @@ export default function CampaignSettings({ onNavigate, onMenuOpen }: CampaignSet
               </Field>
             </Section>
           </div>
+          <StickySaveBar
+            dirty={hasChanges}
+            state={saveState}
+            onCancel={() => { setHasChanges(false); setSaveState('idle') }}
+            onSave={handleSave}
+          />
         </div>
       </div>
-
-      {/* Save bar */}
-      {hasChanges && (
-        <div
-          className="fixed bottom-0 left-0 right-0 flex items-center gap-3 px-4 md:px-6 py-3 border-t bg-white z-40"
-          style={{ borderColor: 'var(--border)', paddingBottom: 'max(12px, env(safe-area-inset-bottom))' }}
-        >
-          {saveState === 'error' && (
-            <div className="flex items-center gap-1.5 text-sm text-red-600">
-              <AlertTriangle size={14} />
-              保存失败，请重试
-            </div>
-          )}
-          {saveState === 'success' && (
-            <div className="flex items-center gap-1.5 text-sm text-green-600">
-              <CheckCircle size={14} />
-              已保存
-            </div>
-          )}
-          {saveState === 'idle' && (
-            <div className="flex items-center gap-1.5 text-sm text-amber-600">
-              <Info size={14} />
-              <span className="hidden md:inline">有未保存的更改</span>
-            </div>
-          )}
-          <div className="flex gap-2 ml-auto">
-            <button
-              className="px-3 md:px-4 py-2 text-sm border rounded-lg hover:bg-gray-50"
-              style={{ borderColor: 'var(--border)', minHeight: 44 }}
-              onClick={() => setHasChanges(false)}
-              disabled={saveState === 'saving'}
-            >
-              取消
-            </button>
-            <button
-              className="px-3 md:px-4 py-2 text-sm font-medium rounded-lg text-white hover:opacity-90 flex items-center gap-1.5 disabled:opacity-60"
-              style={{ background: saveState === 'error' ? '#ef4444' : 'var(--primary)', minHeight: 44 }}
-              onClick={handleSave}
-              disabled={saveState === 'saving'}
-            >
-              {saveState === 'saving' ? <><Loader2 size={13} className="animate-spin" /> 保存中…</> : <><Save size={13} /> 保存更改</>}
-            </button>
-          </div>
-        </div>
-      )}
     </div>
   )
 }

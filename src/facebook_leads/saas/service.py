@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import secrets
+import json
 import re
 from datetime import datetime, time, timedelta, timezone
 from pathlib import Path
@@ -8,9 +9,11 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 from .auth import hash_password, needs_rehash, verify_password
-from .artifacts import safe_artifact_path
+from .artifacts import load_json_safe, safe_artifact_path
+from .artifact_bundle import ArtifactObjectConfig, upload_execution_artifacts, write_execution_bundle
 from .config import ProductionConfig
 from .db import utc_now
+from .logging import configure_logging, log_context
 from .models import PLATFORMS, TARGET_POLICIES, TenantContext
 from .persist import persist_orchestrator_result
 from .providers import BasePlatformProvider, PlatformRunContext, ProviderRunRequest, default_provider_registry
@@ -34,6 +37,7 @@ from .storage import SaaSStorage
 PLATFORM_ACCOUNT_WRITE_FIELDS = {"platform", "display_name", "external_account_id", "external_account_name"}
 CAMPAIGN_WRITE_FIELDS = {
     "name",
+    "description",
     "platform_account_id",
     "status",
     "target_policy",
@@ -58,7 +62,11 @@ CAMPAIGN_WRITE_FIELDS = {
     "reply_per_minute_limit",
     "reply_per_hour_limit",
     "reply_min_interval_seconds",
+    "target_regions_json",
+    "content_types_json",
+    "content_language",
 }
+LEAD_WRITE_FIELDS = {"status", "manual_intent_level", "assigned_user_id", "contacted_at", "invalid_reason"}
 KEYWORD_WRITE_FIELDS = {"keyword", "enabled", "priority"}
 REPLY_RULE_WRITE_FIELDS = {"campaign_id", "name", "enabled", "intent_type", "min_confidence", "reply_template", "language", "approval_mode"}
 REPLY_TEMPLATE_WRITE_FIELDS = {"name", "description", "content", "platform", "language", "enabled", "priority", "is_default"}
@@ -114,6 +122,7 @@ class SaaSService:
         self.quota = QuotaService(storage, self.notifications)
         self.tenant_admin = TenantAdminService(self)
         self.system_admin = SystemAdminService(self)
+        self.logger = configure_logging("service", config.log_level if config else "INFO")
 
     def create_tenant(self, name: str, slug: str, **settings: Any) -> dict[str, Any]:
         allowed_settings = {
@@ -151,8 +160,10 @@ class SaaSService:
         return self.storage.insert("tenant_users", {"tenant_id": tenant_id, "user_id": user_id, "role": role})
 
     def login(self, email: str, password: str) -> dict[str, Any]:
+        self.logger.info("login attempt", extra={"email_domain": _email_domain(email)})
         user = self.storage.find_one("users", {"email": email.lower(), "status": "active"})
         if not user or not verify_password(password, user["password_hash"]):
+            self.logger.warning("login failed", extra={"email_domain": _email_domain(email), "user_found": bool(user)})
             self.audit.record(action="auth.login_failed", resource_type="user", user_id=user["id"] if user else None, metadata={"email": email})
             raise PermissionError("invalid credentials")
         if needs_rehash(user["password_hash"]):
@@ -178,6 +189,7 @@ class SaaSService:
             },
         )
         self.audit.record(action="auth.login_success", resource_type="session", tenant_id=membership["tenant_id"], user_id=user["id"])
+        self.logger.info("login succeeded", extra={"tenant_id": membership["tenant_id"], "user_id": user["id"], "role": membership["role"]})
         return {"access_token": token, "user": _public_user(user), "tenant_id": membership["tenant_id"]}
 
     def logout(self, token: str) -> None:
@@ -185,6 +197,7 @@ class SaaSService:
         self.storage.delete_by_id("sessions", token)
         if session:
             self.audit.record(action="auth.logout", resource_type="session", tenant_id=session["tenant_id"], user_id=session["user_id"])
+            self.logger.info("logout completed", extra={"tenant_id": session["tenant_id"], "user_id": session["user_id"]})
 
     def context_from_token(self, token: str) -> TenantContext:
         session = self.storage.get_by_id("sessions", token)
@@ -252,6 +265,25 @@ class SaaSService:
     def list_platform_accounts(self, context: TenantContext) -> list[dict[str, Any]]:
         accounts = self.storage.list("platform_accounts", tenant_id=context.tenant_id)
         for account in accounts:
+            if account.get("login_status") == "logged_in" and account.get("connection_status") != "connected":
+                self.logger.info(
+                    "platform account connection status reconciled from login state",
+                    extra={
+                        "tenant_id": context.tenant_id,
+                        "user_id": context.user_id,
+                        "platform_account_id": account["id"],
+                        "from_connection_status": account.get("connection_status"),
+                        "login_status": account.get("login_status"),
+                    },
+                )
+                updated = self.storage.update_by_id(
+                    "platform_accounts",
+                    account["id"],
+                    {"connection_status": "connected", "last_checked_at": account.get("last_checked_at") or utc_now()},
+                    tenant_id=context.tenant_id,
+                )
+                if updated:
+                    account.update(updated)
             runtime = self.runtime_registry.get_runtime(context, account["id"])
             account["runtime"] = safe_runtime(runtime) if runtime else None
         return accounts
@@ -263,40 +295,64 @@ class SaaSService:
         payload = _pick(_without_secret_fields(data), PLATFORM_ACCOUNT_WRITE_FIELDS)
         platform = payload.get("platform")
         if platform not in PLATFORMS:
+            self.logger.warning("platform account create rejected", extra={"tenant_id": context.tenant_id, "user_id": context.user_id, "platform": platform, "reason": "unsupported_platform"})
             raise ValueError("unsupported platform")
+        self.logger.info("platform account create started", extra={"tenant_id": context.tenant_id, "user_id": context.user_id, "platform": platform, "fields": sorted(payload)})
         account = self.storage.insert("platform_accounts", {**payload, "tenant_id": context.tenant_id, "config_json": {}, "connection_metadata": {}, "login_status": "unknown"})
         self.audit.record(action="platform_account.create", resource_type="platform_account", resource_id=account["id"], tenant_id=context.tenant_id, user_id=context.user_id, metadata=payload)
+        self.logger.info("platform account created", extra={"tenant_id": context.tenant_id, "user_id": context.user_id, "platform_account_id": account["id"], "platform": platform})
         return account
 
     def update_platform_account(self, context: TenantContext, account_id: str, data: dict[str, Any]) -> dict[str, Any] | None:
         self._require_tenant_writable(context)
         account = self.storage.get_by_id("platform_accounts", account_id, tenant_id=context.tenant_id)
         if not account:
+            self.logger.warning("platform account update missed", extra={"tenant_id": context.tenant_id, "user_id": context.user_id, "platform_account_id": account_id})
             return None
         require_permission(context, Permission.PLATFORM_ACCOUNT_WRITE)
         payload = _pick(_without_secret_fields(data), PLATFORM_ACCOUNT_WRITE_FIELDS)
         if payload.get("platform") not in {None, *PLATFORMS}:
+            self.logger.warning("platform account update rejected", extra={"tenant_id": context.tenant_id, "user_id": context.user_id, "platform_account_id": account_id, "platform": payload.get("platform"), "reason": "unsupported_platform"})
             raise ValueError("unsupported platform")
-        return self.storage.update_by_id("platform_accounts", account_id, payload, tenant_id=context.tenant_id)
+        updated = self.storage.update_by_id("platform_accounts", account_id, payload, tenant_id=context.tenant_id)
+        self.logger.info("platform account updated", extra={"tenant_id": context.tenant_id, "user_id": context.user_id, "platform_account_id": account_id, "fields": sorted(payload)})
+        return updated
 
     def delete_platform_account(self, context: TenantContext, account_id: str) -> None:
         self._require_tenant_writable(context)
         self._require_platform_account(context, account_id)
         require_permission(context, Permission.PLATFORM_ACCOUNT_WRITE)
         if self.storage.find_one("campaigns", {"tenant_id": context.tenant_id, "platform_account_id": account_id, "deleted_at": None}):
+            self.logger.warning("platform account delete blocked", extra={"tenant_id": context.tenant_id, "user_id": context.user_id, "platform_account_id": account_id, "reason": "platform_account_in_use"})
             raise ServiceConflictError("platform_account_in_use")
         runtime = self.runtime_registry.get_runtime(context, account_id)
         if runtime:
+            self.logger.info("platform runtime stopping before account delete", extra={"tenant_id": context.tenant_id, "user_id": context.user_id, "platform_account_id": account_id, "runtime_id": runtime["id"]})
             self.runtime_registry.stop_runtime(context, account_id)
         self.storage.delete_by_id("platform_accounts", account_id, tenant_id=context.tenant_id)
+        self.logger.info("platform account deleted", extra={"tenant_id": context.tenant_id, "user_id": context.user_id, "platform_account_id": account_id})
 
     def connect_platform_account(self, context: TenantContext, account_id: str) -> dict[str, Any]:
         self._require_tenant_writable(context)
         self._require_runtime_available()
         self._require_platform_account(context, account_id)
         require_permission(context, Permission.RUNTIME_CONTROL)
+        self.logger.info("platform runtime start requested", extra={"tenant_id": context.tenant_id, "user_id": context.user_id, "platform_account_id": account_id})
         runtime = self.runtime_registry.start_runtime(context, account_id)
-        self.storage.update_by_id("platform_accounts", account_id, {"connection_status": "login_required"}, tenant_id=context.tenant_id)
+        if runtime.get("status") != "running":
+            message = str(runtime.get("last_error") or "browser runtime did not start")
+            self.logger.warning(
+                "platform runtime start failed",
+                extra={"tenant_id": context.tenant_id, "user_id": context.user_id, "platform_account_id": account_id, "runtime_id": runtime.get("id"), "runtime_status": runtime.get("status"), "error": message},
+            )
+            raise BrowserRuntimeError("runtime_start_failed", message)
+        self.storage.update_by_id(
+            "platform_accounts",
+            account_id,
+            {"connection_status": "login_required", "login_status": "unknown", "last_connection_error": None},
+            tenant_id=context.tenant_id,
+        )
+        self.logger.info("platform runtime started", extra={"tenant_id": context.tenant_id, "user_id": context.user_id, "platform_account_id": account_id, "runtime_id": runtime["id"], "runtime_status": runtime.get("status")})
         return {"runtime": safe_runtime(runtime), "connection_status": "login_required", "login_status": "unknown"}
 
     async def check_platform_login(self, context: TenantContext, account_id: str) -> dict[str, Any]:
@@ -304,6 +360,7 @@ class SaaSService:
         self._require_runtime_available()
         self._require_platform_account(context, account_id)
         require_permission(context, Permission.RUNTIME_CONTROL)
+        self.logger.info("platform login check requested", extra={"tenant_id": context.tenant_id, "user_id": context.user_id, "platform_account_id": account_id})
         return await self.runtime_registry.check_login(context, account_id)
 
     def reconnect_platform_account(self, context: TenantContext, account_id: str) -> dict[str, Any]:
@@ -311,8 +368,22 @@ class SaaSService:
         self._require_runtime_available()
         self._require_platform_account(context, account_id)
         require_permission(context, Permission.RUNTIME_CONTROL)
+        self.logger.info("platform runtime restart requested", extra={"tenant_id": context.tenant_id, "user_id": context.user_id, "platform_account_id": account_id})
         runtime = self.runtime_registry.restart_runtime(context, account_id)
-        self.storage.update_by_id("platform_accounts", account_id, {"connection_status": "login_required"}, tenant_id=context.tenant_id)
+        if runtime.get("status") != "running":
+            message = str(runtime.get("last_error") or "browser runtime did not start")
+            self.logger.warning(
+                "platform runtime restart failed",
+                extra={"tenant_id": context.tenant_id, "user_id": context.user_id, "platform_account_id": account_id, "runtime_id": runtime.get("id"), "runtime_status": runtime.get("status"), "error": message},
+            )
+            raise BrowserRuntimeError("runtime_start_failed", message)
+        self.storage.update_by_id(
+            "platform_accounts",
+            account_id,
+            {"connection_status": "login_required", "login_status": "unknown", "last_connection_error": None},
+            tenant_id=context.tenant_id,
+        )
+        self.logger.info("platform runtime restarted", extra={"tenant_id": context.tenant_id, "user_id": context.user_id, "platform_account_id": account_id, "runtime_id": runtime["id"], "runtime_status": runtime.get("status")})
         return {"runtime": safe_runtime(runtime), "connection_status": "login_required"}
 
     def stop_platform_runtime(self, context: TenantContext, account_id: str) -> dict[str, Any]:
@@ -320,7 +391,9 @@ class SaaSService:
         self._require_runtime_available()
         self._require_platform_account(context, account_id)
         require_permission(context, Permission.RUNTIME_CONTROL)
+        self.logger.info("platform runtime stop requested", extra={"tenant_id": context.tenant_id, "user_id": context.user_id, "platform_account_id": account_id})
         runtime = self.runtime_registry.stop_runtime(context, account_id)
+        self.logger.info("platform runtime stopped", extra={"tenant_id": context.tenant_id, "user_id": context.user_id, "platform_account_id": account_id, "runtime": safe_runtime(runtime)})
         return {"runtime": safe_runtime(runtime)}
 
     def restart_platform_runtime(self, context: TenantContext, account_id: str) -> dict[str, Any]:
@@ -344,12 +417,32 @@ class SaaSService:
         runtime = self.runtime_registry.get_runtime(context, account_id)
         return safe_runtime(runtime) if runtime else None
 
-    def list_campaigns(self, context: TenantContext, *, limit: int = 50, offset: int = 0) -> list[dict[str, Any]]:
+    def list_campaigns(self, context: TenantContext, filters: dict[str, Any] | None = None, *, limit: int = 50, offset: int = 0) -> list[dict[str, Any]]:
         limit = _safe_limit(limit)
-        campaigns = self.storage.list("campaigns", tenant_id=context.tenant_id, filters={"deleted_at": None}, limit=limit, offset=offset)
-        for campaign in campaigns:
-            campaign["schedule"] = self.get_campaign_schedule(context, campaign["id"])
-        return campaigns
+        self.logger.info("campaign list requested", extra={"tenant_id": context.tenant_id, "user_id": context.user_id, "limit": limit, "offset": max(offset, 0), "filters": _non_empty_keys(filters or {})})
+        campaigns = self._query_campaigns(context, filters or {}, limit=limit, offset=max(offset, 0))
+        self.logger.info("campaign list completed", extra={"tenant_id": context.tenant_id, "user_id": context.user_id, "count": len(campaigns), "limit": limit, "offset": max(offset, 0)})
+        return self._enrich_campaigns(context, campaigns)
+
+    def count_campaigns(self, context: TenantContext, filters: dict[str, Any] | None = None) -> int:
+        return self._query_campaign_count(context, filters or {})
+
+    def get_campaign_detail(self, context: TenantContext, campaign_id: str) -> dict[str, Any]:
+        self.logger.info("campaign detail requested", extra={"tenant_id": context.tenant_id, "user_id": context.user_id, "campaign_id": campaign_id})
+        campaign = self._enrich_campaigns(context, [self._require_campaign(context, campaign_id)])[0]
+        account = self.storage.get_by_id("platform_accounts", campaign["platform_account_id"], tenant_id=context.tenant_id)
+        template_id = campaign.get("default_reply_template_id")
+        return {
+            "campaign": campaign,
+            "platform_account": account,
+            "keywords": self.list_keywords(context, campaign_id),
+            "schedule": self.get_campaign_schedule(context, campaign_id),
+            "default_reply_template": self.storage.get_by_id("reply_templates", template_id, tenant_id=context.tenant_id) if isinstance(template_id, str) else None,
+            "matching_rules_count": self.storage.count("reply_match_rules", tenant_id=context.tenant_id, filters={"campaign_id": campaign_id, "archived_at": None}),
+            "leads_count": self.storage.count("leads", tenant_id=context.tenant_id, filters={"campaign_id": campaign_id}),
+            "pending_replies_count": self.storage.count("reply_candidates", tenant_id=context.tenant_id, filters={"campaign_id": campaign_id, "status": "pending_approval"}),
+            "recent_executions": self.storage.list("executions", tenant_id=context.tenant_id, filters={"campaign_id": campaign_id}, limit=10),
+        }
 
     def create_campaign(self, context: TenantContext, data: dict[str, Any]) -> dict[str, Any]:
         return self.create_campaign_with_keywords(context, data, [])
@@ -362,6 +455,16 @@ class SaaSService:
             self.quota.require_feature(context.tenant_id, "allow_multi_keyword")
         payload = self._campaign_payload(context, data)
         require_permission(context, Permission.CAMPAIGN_WRITE)
+        self.logger.info(
+            "campaign create started",
+            extra={
+                "tenant_id": context.tenant_id,
+                "user_id": context.user_id,
+                "platform_account_id": payload.get("platform_account_id"),
+                "keyword_count": len(normalized_keywords),
+                "fields": sorted(_pick(data, CAMPAIGN_WRITE_FIELDS)),
+            },
+        )
         with self.storage.transaction() as session:
             campaign = self.storage.insert("campaigns", payload, session=session)
             for keyword in normalized_keywords:
@@ -377,6 +480,7 @@ class SaaSService:
                     session=session,
                 )
         self.audit.record(action="campaign.create", resource_type="campaign", resource_id=campaign["id"], tenant_id=context.tenant_id, user_id=context.user_id, metadata=_pick(data, CAMPAIGN_WRITE_FIELDS))
+        self.logger.info("campaign created", extra={"tenant_id": context.tenant_id, "user_id": context.user_id, "campaign_id": campaign["id"], "keyword_count": len(normalized_keywords), "status": campaign.get("status")})
         return campaign
 
     def _campaign_payload(self, context: TenantContext, data: dict[str, Any]) -> dict[str, Any]:
@@ -413,12 +517,16 @@ class SaaSService:
             "reply_per_minute_limit": 1,
             "reply_per_hour_limit": 10,
             "reply_min_interval_seconds": 60,
+            "target_regions_json": [],
+            "content_types_json": [],
+            "content_language": "any",
         }
         return {**defaults, **payload, "tenant_id": context.tenant_id}
 
     def update_campaign(self, context: TenantContext, campaign_id: str, data: dict[str, Any]) -> dict[str, Any] | None:
         self._require_tenant_writable(context)
         if not self.storage.get_by_id("campaigns", campaign_id, tenant_id=context.tenant_id):
+            self.logger.warning("campaign update missed", extra={"tenant_id": context.tenant_id, "user_id": context.user_id, "campaign_id": campaign_id})
             return None
         require_permission(context, Permission.CAMPAIGN_WRITE)
         payload = _pick(data, CAMPAIGN_WRITE_FIELDS)
@@ -434,7 +542,9 @@ class SaaSService:
             raise PermissionError("platform account not found")
         if payload.get("default_reply_template_id"):
             self._require_reply_template(context, payload["default_reply_template_id"])
-        return self.storage.update_by_id("campaigns", campaign_id, payload, tenant_id=context.tenant_id)
+        updated = self.storage.update_by_id("campaigns", campaign_id, payload, tenant_id=context.tenant_id)
+        self.logger.info("campaign updated", extra={"tenant_id": context.tenant_id, "user_id": context.user_id, "campaign_id": campaign_id, "fields": sorted(payload), "status": updated.get("status") if updated else None})
+        return updated
 
     def delete_campaign(self, context: TenantContext, campaign_id: str) -> None:
         self._require_tenant_writable(context)
@@ -445,6 +555,7 @@ class SaaSService:
             [context.tenant_id, campaign_id, "queued", "running"],
         )
         if active:
+            self.logger.warning("campaign delete blocked", extra={"tenant_id": context.tenant_id, "user_id": context.user_id, "campaign_id": campaign_id, "execution_id": active["id"], "reason": "campaign_has_active_execution"})
             raise ServiceConflictError("campaign_has_active_execution")
         self.storage.update_by_id(
             "campaigns",
@@ -452,6 +563,7 @@ class SaaSService:
             {"status": "archived", "deleted_at": utc_now()},
             tenant_id=context.tenant_id,
         )
+        self.logger.info("campaign archived", extra={"tenant_id": context.tenant_id, "user_id": context.user_id, "campaign_id": campaign_id})
 
     def list_keywords(self, context: TenantContext, campaign_id: str) -> list[dict[str, Any]]:
         self._require_campaign(context, campaign_id)
@@ -463,7 +575,9 @@ class SaaSService:
         require_permission(context, Permission.KEYWORD_WRITE)
         keywords = _normalize_keywords([str(data.get("keyword") or "")])
         self._require_keyword_quota(context, campaign_id, keywords, enabled=bool(data.get("enabled", True)))
-        return self.storage.insert("campaign_keywords", {"enabled": True, "priority": 100, **_pick(data, KEYWORD_WRITE_FIELDS), "keyword": keywords[0], "tenant_id": context.tenant_id, "campaign_id": campaign_id})
+        row = self.storage.insert("campaign_keywords", {"enabled": True, "priority": 100, **_pick(data, KEYWORD_WRITE_FIELDS), "keyword": keywords[0], "tenant_id": context.tenant_id, "campaign_id": campaign_id})
+        self.logger.info("campaign keyword created", extra={"tenant_id": context.tenant_id, "user_id": context.user_id, "campaign_id": campaign_id, "keyword_id": row["id"], "enabled": row.get("enabled")})
+        return row
 
     def create_keywords(self, context: TenantContext, campaign_id: str, data: dict[str, Any]) -> dict[str, Any]:
         self._require_tenant_writable(context)
@@ -489,6 +603,7 @@ class SaaSService:
                         session=session,
                     )
                 )
+        self.logger.info("campaign keywords bulk created", extra={"tenant_id": context.tenant_id, "user_id": context.user_id, "campaign_id": campaign_id, "created": len(rows), "enabled": enabled})
         return {"items": rows, "created": len(rows)}
 
     def update_keyword(self, context: TenantContext, keyword_id: str, data: dict[str, Any]) -> dict[str, Any] | None:
@@ -509,14 +624,118 @@ class SaaSService:
         self.storage.delete_by_id("campaign_keywords", keyword_id, tenant_id=context.tenant_id)
 
     def list_leads(self, context: TenantContext, filters: dict[str, Any] | None = None, *, limit: int = 50, offset: int = 0) -> dict[str, Any]:
-        allowed = {"campaign_id", "platform", "status", "rule_intent_level", "final_intent_level", "reply_allowed", "keyword"}
         limit = _safe_limit(limit)
-        rows = self.storage.list("leads", tenant_id=context.tenant_id, filters={k: v for k, v in (filters or {}).items() if k in allowed}, limit=limit, offset=max(offset, 0))
-        total = self.storage.count("leads", tenant_id=context.tenant_id, filters={k: v for k, v in (filters or {}).items() if k in allowed})
-        return {"items": rows[:limit], "limit": limit, "offset": max(offset, 0), "total": total}
+        safe_offset = max(offset, 0)
+        self.logger.info("lead list requested", extra={"tenant_id": context.tenant_id, "user_id": context.user_id, "limit": limit, "offset": safe_offset, "filters": _non_empty_keys(filters or {})})
+        rows = self._query_leads(context, filters or {}, limit=limit, offset=safe_offset)
+        total = self._query_lead_count(context, filters or {})
+        self.logger.info("lead list completed", extra={"tenant_id": context.tenant_id, "user_id": context.user_id, "count": len(rows), "total": total, "limit": limit, "offset": safe_offset})
+        return {"items": rows, "limit": limit, "offset": safe_offset, "total": total}
 
     def get_lead(self, context: TenantContext, lead_id: str) -> dict[str, Any] | None:
-        return self.storage.get_by_id("leads", lead_id, tenant_id=context.tenant_id)
+        self.logger.info("lead detail requested", extra={"tenant_id": context.tenant_id, "user_id": context.user_id, "lead_id": lead_id})
+        lead = self.storage.get_by_id("leads", lead_id, tenant_id=context.tenant_id)
+        if not lead:
+            self.logger.warning("lead detail missed", extra={"tenant_id": context.tenant_id, "user_id": context.user_id, "lead_id": lead_id})
+            return None
+        campaign = self.storage.get_by_id("campaigns", lead["campaign_id"], tenant_id=context.tenant_id)
+        account = self.storage.get_by_id("platform_accounts", lead["platform_account_id"], tenant_id=context.tenant_id)
+        return {**lead, "campaign": campaign, "platform_account": account}
+
+    def update_lead(self, context: TenantContext, lead_id: str, data: dict[str, Any]) -> dict[str, Any]:
+        self._require_tenant_writable(context)
+        lead = self._require_lead(context, lead_id)
+        require_permission(context, Permission.CAMPAIGN_WRITE)
+        payload = _pick(data, LEAD_WRITE_FIELDS)
+        if payload.get("assigned_user_id"):
+            self._require_tenant_user(context, payload["assigned_user_id"])
+        if payload.get("status"):
+            self._validate_lead_transition(str(lead.get("status") or "new"), str(payload["status"]))
+        if payload.get("status") == "invalid" and not (payload.get("invalid_reason") or lead.get("invalid_reason")):
+            raise ValueError("invalid_reason_required")
+        payload["updated_by"] = context.user_id
+        updated = self.storage.update_by_id("leads", lead_id, payload, tenant_id=context.tenant_id) or lead
+        self.audit.record(action="lead.update", resource_type="lead", resource_id=lead_id, tenant_id=context.tenant_id, user_id=context.user_id, metadata=payload)
+        self.logger.info("lead updated", extra={"tenant_id": context.tenant_id, "user_id": context.user_id, "campaign_id": lead.get("campaign_id"), "lead_id": lead_id, "fields": sorted(payload), "from_status": lead.get("status"), "to_status": updated.get("status")})
+        return updated
+
+    def list_lead_notes(self, context: TenantContext, lead_id: str, *, limit: int = 50, offset: int = 0) -> dict[str, Any]:
+        self._require_lead(context, lead_id)
+        safe_limit, safe_offset = _safe_limit(limit), max(offset, 0)
+        filters = {"lead_id": lead_id}
+        return {
+            "items": self.storage.list("lead_notes", tenant_id=context.tenant_id, filters=filters, limit=safe_limit, offset=safe_offset),
+            "limit": safe_limit,
+            "offset": safe_offset,
+            "total": self.storage.count("lead_notes", tenant_id=context.tenant_id, filters=filters),
+        }
+
+    def create_lead_note(self, context: TenantContext, lead_id: str, data: dict[str, Any]) -> dict[str, Any]:
+        self._require_tenant_writable(context)
+        self._require_lead(context, lead_id)
+        require_permission(context, Permission.CAMPAIGN_WRITE)
+        row = self.storage.insert(
+            "lead_notes",
+            {
+                "tenant_id": context.tenant_id,
+                "lead_id": lead_id,
+                "author_user_id": context.user_id,
+                "note": str(data["note"]).strip(),
+                "metadata_json": data.get("metadata_json") or {},
+            },
+        )
+        self.audit.record(action="lead.note.create", resource_type="lead", resource_id=lead_id, tenant_id=context.tenant_id, user_id=context.user_id)
+        self.logger.info("lead note created", extra={"tenant_id": context.tenant_id, "user_id": context.user_id, "lead_id": lead_id, "note_id": row["id"]})
+        return row
+
+    def assign_lead(self, context: TenantContext, lead_id: str, assigned_user_id: str) -> dict[str, Any]:
+        return self.update_lead(context, lead_id, {"assigned_user_id": assigned_user_id, "status": "assigned"})
+
+    def mark_lead_contacted(self, context: TenantContext, lead_id: str) -> dict[str, Any]:
+        return self.update_lead(context, lead_id, {"status": "contacted", "contacted_at": utc_now()})
+
+    def mark_lead_invalid(self, context: TenantContext, lead_id: str, invalid_reason: str) -> dict[str, Any]:
+        return self.update_lead(context, lead_id, {"status": "invalid", "invalid_reason": invalid_reason})
+
+    def bulk_update_leads(self, context: TenantContext, lead_ids: list[str], data: dict[str, Any]) -> dict[str, Any]:
+        self._require_tenant_writable(context)
+        require_permission(context, Permission.CAMPAIGN_WRITE)
+        payload = _pick(data, LEAD_WRITE_FIELDS)
+        if payload.get("assigned_user_id"):
+            self._require_tenant_user(context, payload["assigned_user_id"])
+        updated: list[dict[str, Any]] = []
+        with self.storage.transaction() as session:
+            for lead_id in lead_ids:
+                lead = self.storage.get_by_id("leads", lead_id, tenant_id=context.tenant_id, session=session)
+                if not lead:
+                    self.logger.warning("lead bulk update missed", extra={"tenant_id": context.tenant_id, "user_id": context.user_id, "lead_id": lead_id})
+                    raise PermissionError("lead not found")
+                if payload.get("status"):
+                    self._validate_lead_transition(str(lead.get("status") or "new"), str(payload["status"]))
+                row = self.storage.update_by_id("leads", lead_id, {**payload, "updated_by": context.user_id}, tenant_id=context.tenant_id, session=session)
+                if row:
+                    updated.append(row)
+        self.audit.record(action="lead.bulk_update", resource_type="lead", tenant_id=context.tenant_id, user_id=context.user_id, metadata={"count": len(updated)})
+        self.logger.info("lead bulk updated", extra={"tenant_id": context.tenant_id, "user_id": context.user_id, "requested": len(lead_ids), "updated": len(updated), "fields": sorted(payload)})
+        return {"items": updated, "updated": len(updated)}
+
+    def lead_timeline(self, context: TenantContext, lead_id: str) -> dict[str, Any]:
+        lead = self._require_lead(context, lead_id)
+        items: list[dict[str, Any]] = [
+            {"type": "lead.created", "created_at": lead.get("created_at"), "title": "Lead created", "metadata": {"status": lead.get("status")}},
+        ]
+        if lead.get("assigned_user_id"):
+            items.append({"type": "lead.assigned", "created_at": lead.get("updated_at"), "title": "Lead assigned", "metadata": {"assigned_user_id": lead.get("assigned_user_id")}})
+        if lead.get("contacted_at"):
+            items.append({"type": "lead.contacted", "created_at": lead.get("contacted_at"), "title": "Lead contacted", "metadata": {}})
+        if lead.get("invalid_reason"):
+            items.append({"type": "lead.invalid", "created_at": lead.get("updated_at"), "title": "Lead marked invalid", "metadata": {"reason": lead.get("invalid_reason")}})
+        for note in self.storage.list("lead_notes", tenant_id=context.tenant_id, filters={"lead_id": lead_id}, limit=200):
+            items.append({"type": "lead.note", "created_at": note.get("created_at"), "title": "Note added", "metadata": note})
+        for candidate in self.storage.list("reply_candidates", tenant_id=context.tenant_id, filters={"comment_fingerprint": lead.get("comment_fingerprint")}, limit=50):
+            items.append({"type": "reply_candidate." + str(candidate.get("status")), "created_at": candidate.get("created_at"), "title": "Reply candidate", "metadata": candidate})
+        items.sort(key=lambda item: str(item.get("created_at") or ""))
+        return {"items": items, "limit": len(items), "offset": 0, "total": len(items)}
 
     def list_reply_templates(self, context: TenantContext, *, include_archived: bool = False) -> list[dict[str, Any]]:
         filters = {} if include_archived else {"archived_at": None}
@@ -731,9 +950,74 @@ class SaaSService:
         return self.storage.update_by_id("reply_plans", plan_id, {"status": "executed", "executed_at": utc_now()}, tenant_id=context.tenant_id) or plan
 
     def list_reply_records(self, context: TenantContext, *, limit: int = 100, offset: int = 0) -> dict[str, Any]:
-        rows = self.storage.list("reply_records", tenant_id=context.tenant_id, limit=_safe_limit(limit), offset=offset)
-        total = self.storage.count("reply_records", tenant_id=context.tenant_id)
-        return {"items": rows, "limit": _safe_limit(limit), "offset": offset, "total": total}
+        return self.query_reply_records(context, {}, limit=limit, offset=offset)
+
+    def query_reply_records(self, context: TenantContext, filters: dict[str, Any], *, limit: int = 100, offset: int = 0) -> dict[str, Any]:
+        safe_limit, safe_offset = _safe_limit(limit), max(offset, 0)
+        clauses = ["tenant_id = ?"]
+        values: list[Any] = [context.tenant_id]
+        for column in ["campaign_id", "platform_account_id", "status", "verified", "error_type"]:
+            value = filters.get(column)
+            if value is not None and value != "":
+                clauses.append(f"{column} = ?")
+                values.append(value)
+        if filters.get("author_name") or filters.get("keyword"):
+            subclauses: list[str] = []
+            subvalues: list[Any] = [context.tenant_id]
+            if filters.get("author_name"):
+                subclauses.append("LOWER(COALESCE(author_name, '')) LIKE ?")
+                subvalues.append(f"%{str(filters['author_name']).lower()}%")
+            if filters.get("keyword"):
+                subclauses.append("LOWER(COALESCE(comment_text, '')) LIKE ?")
+                subvalues.append(f"%{str(filters['keyword']).lower()}%")
+            candidates = self.storage.query_all(
+                f"SELECT id FROM reply_candidates WHERE tenant_id = ? AND ({' OR '.join(subclauses)})",
+                subvalues,
+            )
+            candidate_ids = [row["id"] for row in candidates]
+            if not candidate_ids:
+                clauses.append("1 = 0")
+            else:
+                clauses.append(f"reply_candidate_id IN ({', '.join('?' for _ in candidate_ids)})")
+                values.extend(candidate_ids)
+        if filters.get("created_from"):
+            clauses.append("created_at >= ?")
+            values.append(filters["created_from"])
+        if filters.get("created_to"):
+            clauses.append("created_at < ?")
+            values.append(filters["created_to"])
+        where = " AND ".join(clauses)
+        total_row = self.storage.query_one(f"SELECT COUNT(*) AS count FROM reply_records WHERE {where}", values)
+        rows = self.storage.query_all(
+            f"SELECT * FROM reply_records WHERE {where} ORDER BY created_at DESC LIMIT ? OFFSET ?",
+            [*values, safe_limit, safe_offset],
+        )
+        return {"items": rows, "limit": safe_limit, "offset": safe_offset, "total": int(total_row["count"] if total_row else 0)}
+
+    def get_reply_record_detail(self, context: TenantContext, record_id: str) -> dict[str, Any]:
+        record = self.storage.get_by_id("reply_records", record_id, tenant_id=context.tenant_id)
+        if not record:
+            raise PermissionError("reply record not found")
+        candidate_id = record.get("reply_candidate_id")
+        plan_id = record.get("reply_plan_id")
+        candidate = self.storage.get_by_id("reply_candidates", candidate_id, tenant_id=context.tenant_id) if isinstance(candidate_id, str) else None
+        plan = self.storage.get_by_id("reply_plans", plan_id, tenant_id=context.tenant_id) if isinstance(plan_id, str) else None
+        campaign = self.storage.get_by_id("campaigns", record["campaign_id"], tenant_id=context.tenant_id)
+        account = self.storage.get_by_id("platform_accounts", record["platform_account_id"], tenant_id=context.tenant_id)
+        execution_id = (plan or {}).get("execution_id") or (candidate or {}).get("execution_id")
+        template_id = (candidate or {}).get("reply_template_id")
+        rule_id = (candidate or {}).get("matched_rule_id")
+        return {
+            "record": record,
+            "candidate": candidate,
+            "plan": plan,
+            "campaign": campaign,
+            "account": account,
+            "execution": self.storage.get_by_id("executions", execution_id, tenant_id=context.tenant_id) if isinstance(execution_id, str) else None,
+            "original_comment": {"comment_id": record.get("comment_id"), "text": (candidate or {}).get("comment_text")},
+            "matched_rule": self.storage.get_by_id("reply_match_rules", rule_id, tenant_id=context.tenant_id) if isinstance(rule_id, str) else None,
+            "template": self.storage.get_by_id("reply_templates", template_id, tenant_id=context.tenant_id) if isinstance(template_id, str) else None,
+        }
 
     def generate_reply_plan_for_execution(self, context: TenantContext, execution_id: str) -> dict[str, Any] | None:
         execution = self._require_execution(context, execution_id)
@@ -868,6 +1152,110 @@ class SaaSService:
             tenant_id=context.tenant_id,
         ) or execution
 
+    def retry_execution(self, context: TenantContext, execution_id: str) -> dict[str, Any]:
+        self._require_tenant_writable(context)
+        execution = self._require_execution(context, execution_id)
+        require_permission(context, Permission.EXECUTION_RUN)
+        retryable = execution.get("status") in {"failed", "cancelled"} or _is_retryable_error(execution.get("error_type"), execution.get("error_message"))
+        if execution.get("status") in {"queued", "running", "completed"} or not retryable:
+            raise ServiceConflictError("execution_not_retryable")
+        result = self.enqueue_campaign_execution(context, execution["campaign_id"], trigger_type="retry")
+        self.audit.record(action="execution.retry", resource_type="execution", resource_id=execution_id, tenant_id=context.tenant_id, user_id=context.user_id, metadata={"retry_execution_id": result["execution_id"]})
+        return result
+
+    def execution_timeline(self, context: TenantContext, execution_id: str) -> dict[str, Any]:
+        execution = self._require_execution(context, execution_id)
+        items = [{"type": f"execution.{execution.get('status')}", "created_at": execution.get("created_at"), "title": "Execution created", "metadata": execution}]
+        queue = self.storage.find_one("execution_queue_items", {"tenant_id": context.tenant_id, "execution_id": execution_id})
+        if queue:
+            items.append({"type": f"queue.{queue.get('status')}", "created_at": queue.get("queued_at"), "title": "Queue item", "metadata": queue})
+        for keyword in self.list_execution_keywords(context, execution_id):
+            items.append({"type": f"keyword.{keyword.get('status')}", "created_at": keyword.get("created_at"), "title": "Keyword execution", "metadata": keyword})
+        items.sort(key=lambda row: str(row.get("created_at") or ""))
+        return {"items": items, "limit": len(items), "offset": 0, "total": len(items)}
+
+    def execution_artifacts(self, context: TenantContext, execution_id: str, *, artifact_type: str | None = None) -> dict[str, Any]:
+        self._require_execution(context, execution_id)
+        root = safe_artifact_path(self.artifacts_root, "tenants", context.tenant_id, "executions", execution_id)
+        items: list[dict[str, Any]] = []
+        manifest_by_path = self._artifact_manifest_by_path(root)
+        if root.exists():
+            for path in root.rglob("*"):
+                if not path.is_file():
+                    continue
+                kind = _artifact_type(path)
+                if artifact_type and kind != artifact_type:
+                    continue
+                rel = path.relative_to(root).as_posix()
+                if artifact_type is None and rel != "execution_report.html":
+                    continue
+                items.append(
+                    {
+                        "type": kind,
+                        "name": path.name,
+                        "url": f"/api/executions/{execution_id}/artifacts/{rel}",
+                        "external_url": manifest_by_path.get(rel, {}).get("url"),
+                        "created_at": datetime.fromtimestamp(path.stat().st_mtime, timezone.utc).isoformat(),
+                    }
+                )
+        items.sort(key=lambda row: str(row.get("created_at") or ""), reverse=True)
+        return {"items": items, "limit": len(items), "offset": 0, "total": len(items)}
+
+    def execution_artifact_path(self, context: TenantContext, execution_id: str, artifact_path: str) -> Path:
+        self._require_execution(context, execution_id)
+        parts = [part for part in str(artifact_path).replace("\\", "/").split("/") if part]
+        root = safe_artifact_path(self.artifacts_root, "tenants", context.tenant_id, "executions", execution_id)
+        target = safe_artifact_path(root, *parts)
+        if not target.is_file():
+            raise FileNotFoundError(artifact_path)
+        return target
+
+    def _artifact_manifest_by_path(self, root: Path) -> dict[str, dict[str, Any]]:
+        manifest = load_json_safe(root / "artifact_manifest.json", default={})
+        items = manifest.get("items") if isinstance(manifest, dict) else None
+        if not isinstance(items, list):
+            return {}
+        output: dict[str, dict[str, Any]] = {}
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            key = str(item.get("key") or "")
+            name = str(item.get("name") or "")
+            for path in root.rglob(name):
+                if path.is_file():
+                    output[path.relative_to(root).as_posix()] = item
+        return output
+
+    def execution_logs(self, context: TenantContext, execution_id: str, *, limit: int = 100, offset: int = 0) -> dict[str, Any]:
+        self._require_execution(context, execution_id)
+        root = safe_artifact_path(self.artifacts_root, "tenants", context.tenant_id, "executions", execution_id)
+        lines: list[dict[str, Any]] = []
+        if root.exists():
+            for path in root.rglob("*"):
+                if not path.is_file() or _artifact_type(path) != "log":
+                    continue
+                target = path.resolve()
+                if root not in target.parents:
+                    continue
+                try:
+                    for line in target.read_text(encoding="utf-8", errors="replace").splitlines():
+                        lines.append({"source": target.name, "line": _redact_sensitive(line)[:2000]})
+                except OSError:
+                    continue
+        safe_limit, safe_offset = _safe_limit(limit), max(offset, 0)
+        return {"items": lines[safe_offset : safe_offset + safe_limit], "limit": safe_limit, "offset": safe_offset, "total": len(lines)}
+
+    def execution_token_usage(self, context: TenantContext, execution_id: str, *, limit: int = 100, offset: int = 0) -> dict[str, Any]:
+        self._require_execution(context, execution_id)
+        safe_limit, safe_offset = _safe_limit(limit), max(offset, 0)
+        filters = {"execution_id": execution_id}
+        return {
+            "items": self.storage.list("token_usage", tenant_id=context.tenant_id, filters=filters, limit=safe_limit, offset=safe_offset),
+            "limit": safe_limit,
+            "offset": safe_offset,
+            "total": self.storage.count("token_usage", tenant_id=context.tenant_id, filters=filters),
+        }
+
     def get_campaign_schedule(self, context: TenantContext, campaign_id: str) -> dict[str, Any] | None:
         self._require_campaign(context, campaign_id)
         return self.storage.find_one("campaign_schedules", {"tenant_id": context.tenant_id, "campaign_id": campaign_id})
@@ -908,11 +1296,77 @@ class SaaSService:
             return self.put_campaign_schedule(context, campaign_id, {"schedule_type": "manual", "enabled": False, "timezone": "UTC"})
         return self.storage.update_by_id("campaign_schedules", schedule["id"], {"enabled": False, "schedule_type": "manual", "next_run_at": None}, tenant_id=context.tenant_id) or schedule
 
-    def dashboard_summary(self, context: TenantContext) -> dict[str, Any]:
+    def dashboard_summary(self, context: TenantContext, *, range_days: int = 7) -> dict[str, Any]:
         queue_counts = self.storage.queue_counts(tenant_id=context.tenant_id)
+        since = utc_now() - timedelta(days=max(1, min(range_days, 30)) - 1)
+        lead_trend = self.storage.query_all(
+            """
+            SELECT DATE(created_at) AS date, COUNT(*) AS leads, 0 AS comments_scanned
+            FROM leads
+            WHERE tenant_id = ? AND created_at >= ?
+            GROUP BY DATE(created_at)
+            ORDER BY DATE(created_at)
+            """,
+            [context.tenant_id, since],
+        )
+        comment_trend = {
+            str(row["date"]): int(row["comments_scanned"])
+            for row in self.storage.query_all(
+                """
+                SELECT DATE(created_at) AS date, COALESCE(SUM(scanned_comments), 0) AS comments_scanned
+                FROM executions
+                WHERE tenant_id = ? AND created_at >= ?
+                GROUP BY DATE(created_at)
+                """,
+                [context.tenant_id, since],
+            )
+        }
+        for row in lead_trend:
+            row["leads"] = int(row["leads"])
+            row["comments_scanned"] = comment_trend.get(str(row["date"]), 0)
+        intent_distribution = self.storage.query_all(
+            """
+            SELECT COALESCE(manual_intent_level, final_intent_level, 'unknown') AS intent_level, COUNT(*) AS count
+            FROM leads
+            WHERE tenant_id = ?
+            GROUP BY COALESCE(manual_intent_level, final_intent_level, 'unknown')
+            """,
+            [context.tenant_id],
+        )
+        for row in intent_distribution:
+            row["count"] = int(row["count"])
+        campaign_performance = [
+            {
+                "campaign_id": row["id"],
+                "campaign_name": row["name"],
+                "platform": row.get("platform") or "facebook",
+                "status": row["status"],
+                "lead_count": row.get("lead_count") or 0,
+                "pending_reply_count": row.get("pending_reply_count") or 0,
+                "last_execution_at": row.get("last_execution_at"),
+            }
+            for row in self.list_campaigns(context, {}, limit=10)
+        ]
+        pending_reply_items = self.list_reply_candidates(context, {"status": "pending_approval"}, limit=10)["items"]
+        platform_status = [
+            {
+                "account_id": account["id"],
+                "platform": account["platform"],
+                "display_name": account["display_name"],
+                "connection_status": account["connection_status"],
+                "login_status": account.get("login_status"),
+                "runtime_status": (account.get("runtime") or {}).get("status") if account.get("runtime") else None,
+            }
+            for account in self.list_platform_accounts(context)
+        ]
+        comments_today = self.storage.query_one(
+            "SELECT COALESCE(SUM(scanned_comments), 0) AS count FROM executions WHERE tenant_id = ? AND created_at >= ?",
+            [context.tenant_id, _today_start()],
+        )
         return {
             "active_campaigns": self._count(context, "campaigns", {"status": "active"}),
             "connected_platform_accounts": self._count(context, "platform_accounts", {"connection_status": "connected"}),
+            "comments_scanned_today": int(comments_today["count"] if comments_today else 0),
             "leads_today": self._count(context, "leads", date_field="discovered_at", since_today=True),
             "new_leads": self._count(context, "leads", {"status": "new"}),
             "high_intent_leads": self._count(context, "leads", {"final_intent_level": "high"}),
@@ -926,10 +1380,16 @@ class SaaSService:
             "pending_replies": self._count(context, "reply_candidates", {"status": "pending_approval"}),
             "today_replied": self._count(context, "reply_records", {"status": "sent"}, date_field="created_at", since_today=True),
             "today_failed_replies": self._count(context, "reply_records", {"status": "failed"}, date_field="created_at", since_today=True),
+            "failed_tasks_today": self._count(context, "executions", {"status": "failed"}, date_field="created_at", since_today=True),
             "reply_success_rate": self._reply_success_rate(context),
             "system_send_enabled": self._system_send_enabled(),
             "reply_safety_message": "" if self._system_send_enabled() else "回复发送当前处于关闭状态",
+            "lead_trend": lead_trend,
+            "intent_distribution": intent_distribution,
+            "campaign_performance": campaign_performance,
             "recent_executions": self.list_executions(context, limit=5),
+            "pending_reply_items": pending_reply_items,
+            "platform_status": platform_status,
             "latest_leads": self.list_leads(context, limit=5)["items"],
         }
 
@@ -958,11 +1418,13 @@ class SaaSService:
         }
 
     async def run_campaign(self, context: TenantContext, campaign_id: str) -> dict[str, Any]:
+        self.logger.info("manual campaign run requested", extra={"tenant_id": context.tenant_id, "user_id": context.user_id, "campaign_id": campaign_id})
         execution = self.enqueue_campaign_execution(context, campaign_id, trigger_type="manual")
         return {"execution_id": execution["id"], "status": "queued", "send_disabled": True}
 
     def enqueue_campaign_execution(self, context: TenantContext, campaign_id: str, *, trigger_type: str, schedule_trigger_key: str | None = None) -> dict[str, Any]:
         self._require_tenant_writable(context)
+        self.logger.info("campaign enqueue started", extra={"tenant_id": context.tenant_id, "user_id": context.user_id, "campaign_id": campaign_id, "trigger_type": trigger_type, "has_schedule_trigger_key": bool(schedule_trigger_key)})
         self.quota.check_quota(context.tenant_id, "monthly_executions")
         self.quota.check_quota(context.tenant_id, "monthly_tokens", increment=0)
         self.quota.warn_all(context.tenant_id)
@@ -977,6 +1439,7 @@ class SaaSService:
         queue_counts = self.storage.queue_counts(tenant_id=context.tenant_id)
         queued_count = queue_counts.get("queued", 0) + queue_counts.get("retry_waiting", 0)
         if queued_count >= self.max_queued_executions_per_tenant:
+            self.logger.warning("campaign enqueue rejected", extra={"tenant_id": context.tenant_id, "user_id": context.user_id, "campaign_id": campaign_id, "queued_count": queued_count, "limit": self.max_queued_executions_per_tenant, "reason": "queue_limit_reached"})
             raise ValueError("queue_limit_reached")
         account = self.storage.get_by_id("platform_accounts", campaign["platform_account_id"], tenant_id=context.tenant_id)
         if not account:
@@ -989,6 +1452,7 @@ class SaaSService:
             order_by=["priority", "created_at"],
         )
         if not keywords:
+            self.logger.warning("campaign enqueue rejected", extra={"tenant_id": context.tenant_id, "user_id": context.user_id, "campaign_id": campaign_id, "reason": "no_enabled_keyword"})
             raise ValueError("campaign has no enabled keyword")
         snapshot = self.campaigns.config_snapshot(campaign, keywords)
         execution = self.storage.insert(
@@ -1020,18 +1484,23 @@ class SaaSService:
         )
         if queue is None:
             self.storage.delete_by_id("executions", execution["id"], tenant_id=context.tenant_id)
+            self.logger.warning("campaign enqueue deduplicated", extra={"tenant_id": context.tenant_id, "user_id": context.user_id, "campaign_id": campaign_id, "execution_id": execution["id"]})
             raise ValueError("schedule window already enqueued")
+        self.logger.info("campaign enqueued", extra={"tenant_id": context.tenant_id, "user_id": context.user_id, "campaign_id": campaign_id, "execution_id": execution["id"], "queue_item_id": queue["id"], "keyword_count": len(keywords), "send_disabled": True})
         return execution
 
     async def run_queue_item(self, queue_item: dict[str, Any]) -> dict[str, Any]:
         context = TenantContext(tenant_id=queue_item["tenant_id"], user_id="worker", role="worker")
         execution = self._require_execution(context, queue_item["execution_id"])
         campaign = self._require_campaign(context, queue_item["campaign_id"])
+        run_logger = log_context(self.logger, tenant_id=context.tenant_id, campaign_id=campaign["id"], execution_id=execution["id"], queue_item_id=queue_item["id"])
+        run_logger.info("queue item run started", extra={"attempt_count": queue_item.get("attempt_count"), "status": queue_item.get("status")})
         snapshot = execution.get("config_snapshot") or {}
         execution_campaign = {**campaign, **{key: value for key, value in snapshot.items() if key != "keywords"}}
         if execution_campaign.get("llm_enabled") and self.config and not (
             self.config.llm_endpoint and self.config.llm_api_key and self.config.llm_model
         ):
+            run_logger.warning("queue item failed preflight", extra={"reason": "llm_configuration_missing"})
             return self._finish_queue_failure(
                 queue_item,
                 execution,
@@ -1040,16 +1509,27 @@ class SaaSService:
             )
         account = self.storage.get_by_id("platform_accounts", snapshot.get("platform_account_id") or campaign["platform_account_id"], tenant_id=context.tenant_id)
         if not account:
+            run_logger.warning("queue item failed preflight", extra={"reason": "platform_account_not_found"})
             return self._finish_queue_failure(queue_item, execution, "platform_account_not_connected", "platform account not found")
+        if account.get("login_status") != "logged_in":
+            try:
+                login = await self.runtime_registry.check_login(context, account["id"])
+                account = self.storage.get_by_id("platform_accounts", account["id"], tenant_id=context.tenant_id) or account
+                run_logger.info("queue item refreshed platform login", extra={"platform_account_id": account["id"], "login_status": login.get("login_status"), "connection_status": login.get("connection_status")})
+            except Exception as exc:
+                run_logger.warning("queue item login refresh failed", extra={"platform_account_id": account["id"], "error_type": type(exc).__name__})
         try:
             runtime = self._preflight_runtime(context, account, campaign["id"], create_failed_execution=False)
         except ValueError as exc:
+            run_logger.warning("queue item runtime preflight failed", extra={"error_type": str(exc), "platform_account_id": account.get("id")})
             return self._finish_queue_error(queue_item, execution, str(exc), str(exc))
         lock_key = runtime["id"]
         if lock_key in self._runtime_locks:
+            run_logger.warning("queue item runtime lock busy", extra={"runtime_id": runtime["id"], "lock_scope": "process"})
             return self._retry_queue_item(queue_item, execution, "runtime_locked", "same platform account already has an active run")
         provider = self.providers.get(account["platform"])
         if not provider:
+            run_logger.warning("queue item provider missing", extra={"platform": account["platform"]})
             return self._finish_queue_failure(queue_item, execution, "provider_not_registered", "provider not registered")
         run_context = PlatformRunContext(
             tenant_id=context.tenant_id,
@@ -1062,15 +1542,19 @@ class SaaSService:
         )
         keywords = snapshot.get("keywords") or []
         if not keywords:
+            run_logger.warning("queue item has empty keyword snapshot")
             return self._finish_queue_failure(queue_item, execution, "no_enabled_keyword", "campaign has no enabled keyword")
         database_lock = self.storage.acquire_runtime_lock(lock_key)
         if database_lock is None:
+            run_logger.warning("queue item runtime lock busy", extra={"runtime_id": runtime["id"], "lock_scope": "database"})
             return self._retry_queue_item(queue_item, execution, "runtime_locked", "same browser runtime is already in use by another worker")
         if lock_key in self._runtime_locks:
             self.storage.release_runtime_lock(database_lock)
+            run_logger.warning("queue item runtime lock busy", extra={"runtime_id": runtime["id"], "lock_scope": "process_after_db_lock"})
             return self._retry_queue_item(queue_item, execution, "runtime_locked", "same platform account already has an active run")
         self._runtime_locks.add(lock_key)
         self.storage.update_by_id("executions", execution["id"], {"status": "running", "stage": "worker", "started_at": utc_now(), "total_keywords": len(keywords), "progress_percent": 0}, tenant_id=context.tenant_id)
+        run_logger.info("queue item execution marked running", extra={"runtime_id": runtime["id"], "platform_account_id": account["id"], "keyword_count": len(keywords), "send_disabled": True})
         try:
             completed = 0
             failed = 0
@@ -1079,6 +1563,7 @@ class SaaSService:
             for index, keyword in enumerate(keywords, start=1):
                 current = self.storage.get_by_id("executions", execution["id"], tenant_id=context.tenant_id) or execution
                 if current.get("cancel_requested"):
+                    run_logger.info("queue item cancellation observed", extra={"completed": completed, "failed": failed, "keyword_index": index})
                     break
                 keyword_row = self.storage.find_one(
                     "execution_keywords",
@@ -1101,6 +1586,7 @@ class SaaSService:
                 else:
                     keyword_row = self.storage.insert("execution_keywords", keyword_payload)
                 self.storage.update_by_id("executions", execution["id"], {"current_keyword": keyword["keyword"], "progress_percent": int((index - 1) * 100 / len(keywords))}, tenant_id=context.tenant_id)
+                run_logger.info("keyword run started", extra={"execution_keyword_id": keyword_row["id"], "keyword_index": index, "keyword_total": len(keywords)})
                 try:
                     result = await provider.run_campaign(self._provider_request(context, execution_campaign, keyword["keyword"], run_context, execution["id"]))
                     summary = _keyword_summary(result)
@@ -1127,12 +1613,14 @@ class SaaSService:
                             retryable_failures += 1
                             last_retryable_error = (str(result.get("error_type") or "temporary_error"), str(result.get("error_message") or "temporary provider failure"))
                     self.storage.update_by_id("execution_keywords", keyword_row["id"], {"status": status, "finished_at": utc_now(), **summary, "error_type": result.get("error_type"), "error_message": result.get("error_message")}, tenant_id=context.tenant_id)
+                    run_logger.info("keyword run finished", extra={"execution_keyword_id": keyword_row["id"], "keyword_index": index, "status": status, **summary, "error_type": result.get("error_type")})
                 except Exception as exc:
                     failed += 1
                     if _is_retryable_error(type(exc).__name__, str(exc)):
                         retryable_failures += 1
                         last_retryable_error = (type(exc).__name__, str(exc))
                     self.storage.update_by_id("execution_keywords", keyword_row["id"], {"status": "failed", "finished_at": utc_now(), "error_type": type(exc).__name__, "error_message": str(exc)}, tenant_id=context.tenant_id)
+                    run_logger.exception("keyword run crashed", extra={"execution_keyword_id": keyword_row["id"], "keyword_index": index, "error_type": type(exc).__name__})
                 self._update_execution_aggregate(context, execution["id"], total=len(keywords), completed=completed, failed=failed)
             if completed == 0 and failed == len(keywords) and retryable_failures == failed:
                 for row in self.storage.list(
@@ -1144,19 +1632,24 @@ class SaaSService:
                     if not self.storage.find_one("token_usage", {"execution_keyword_id": row["id"]}):
                         self.storage.delete_by_id("execution_keywords", row["id"], tenant_id=context.tenant_id)
                 self.storage.update_by_id("executions", execution["id"], {"completed_keywords": 0, "failed_keywords": 0, "current_keyword": None, "progress_percent": 0}, tenant_id=context.tenant_id)
+                run_logger.warning("queue item all failures retryable", extra={"failed": failed, "retryable_failures": retryable_failures, "error_type": last_retryable_error[0]})
                 return self._retry_queue_item(queue_item, execution, *last_retryable_error)
             final_execution = self.storage.get_by_id("executions", execution["id"], tenant_id=context.tenant_id) or execution
             status = "cancelled" if final_execution.get("cancel_requested") else ("completed" if completed == len(keywords) else "partial" if completed else "failed")
             self._update_execution_aggregate(context, execution["id"], total=len(keywords), completed=completed, failed=failed, status=status, finished=True)
             if status in {"completed", "partial"}:
+                final_execution = self._finalize_execution_artifacts(context, execution["id"])
                 self.generate_reply_plan_for_execution(context, execution["id"])
+            run_logger.info("queue item run finished", extra={"status": status, "completed": completed, "failed": failed, "keyword_count": len(keywords), "execution_report": bool(final_execution if status in {"completed", "partial"} else None)})
             return self.storage.update_by_id("execution_queue_items", queue_item["id"], {"status": "completed" if status in {"completed", "partial"} else status, "finished_at": utc_now()}, tenant_id=context.tenant_id) or queue_item
         except Exception as exc:
             self.storage.update_by_id("browser_runtimes", runtime["id"], {"status": "unhealthy", "last_error": "campaign run failed"}, tenant_id=context.tenant_id)
+            run_logger.exception("queue item run crashed", extra={"runtime_id": runtime["id"], "error_type": type(exc).__name__})
             return self._finish_queue_error(queue_item, execution, type(exc).__name__, str(exc))
         finally:
             self._runtime_locks.discard(lock_key)
             self.storage.release_runtime_lock(database_lock)
+            run_logger.info("queue item runtime lock released", extra={"runtime_id": runtime["id"]})
 
     def _provider_request(self, context: TenantContext, campaign: dict[str, Any], keyword: str, run_context: PlatformRunContext, execution_id: str) -> ProviderRunRequest:
         execution_root = safe_artifact_path(
@@ -1177,9 +1670,50 @@ class SaaSService:
             max_leads=int(campaign["max_leads"]),
             daily_limit=int(campaign["daily_limit"]),
             llm_enabled=bool(campaign["llm_enabled"]),
+            custom_positive_keywords=tuple(str(item).strip() for item in (campaign.get("positive_keywords_json") or []) if str(item).strip()),
             history_path=str(execution_root / "reply_history.jsonl"),
             runs_root=str(execution_root / "runs"),
             run_context=run_context,
+        )
+
+    def _finalize_execution_artifacts(self, context: TenantContext, execution_id: str) -> dict[str, Any] | None:
+        execution = self.storage.get_by_id("executions", execution_id, tenant_id=context.tenant_id)
+        if not execution:
+            return None
+        root = safe_artifact_path(self.artifacts_root, "tenants", context.tenant_id, "executions", execution_id)
+        keywords = self.storage.list("execution_keywords", tenant_id=context.tenant_id, filters={"execution_id": execution_id}, limit=1000)
+        leads = self.storage.list("leads", tenant_id=context.tenant_id, filters={"campaign_id": execution["campaign_id"]}, limit=200)
+        paths = write_execution_bundle(root, tenant_id=context.tenant_id, execution=execution, keywords=keywords, leads=leads)
+        upload = upload_execution_artifacts(root, tenant_id=context.tenant_id, execution_id=execution_id, config=self._artifact_object_config())
+        metadata = {
+            "execution_report_json": str(paths["execution_report_json"]),
+            "execution_report_html": str(paths["execution_report_html"]),
+            "object_storage": {
+                "enabled": bool(upload.get("enabled")),
+                "uploaded": upload.get("uploaded"),
+                "error": upload.get("error"),
+                "items": [
+                    item
+                    for item in upload.get("items", [])
+                    if item.get("name") == "execution_report.html"
+                ],
+            },
+        }
+        self.logger.info("execution artifacts finalized", extra={"tenant_id": context.tenant_id, "execution_id": execution_id, "uploaded": upload.get("uploaded"), "object_storage_enabled": upload.get("enabled"), "object_storage_error": upload.get("error")})
+        return self.storage.update_by_id("executions", execution_id, {"config_snapshot": {**(execution.get("config_snapshot") or {}), "artifacts": metadata}}, tenant_id=context.tenant_id) or execution
+
+    def _artifact_object_config(self) -> ArtifactObjectConfig:
+        config = self.config
+        return ArtifactObjectConfig(
+            enabled=bool(config and config.artifact_s3_enabled),
+            endpoint=config.artifact_s3_endpoint if config else None,
+            access_key=config.artifact_s3_access_key if config else None,
+            secret_key=config.artifact_s3_secret_key if config else None,
+            bucket=config.artifact_s3_bucket if config else None,
+            region=config.artifact_s3_region if config else "us-east-1",
+            prefix=config.artifact_s3_prefix if config else "saas-artifacts",
+            public_base_url=config.artifact_s3_public_base_url if config else None,
+            secure=bool(config.artifact_s3_secure) if config else True,
         )
 
     def _update_execution_aggregate(self, context: TenantContext, execution_id: str, *, total: int, completed: int, failed: int, status: str | None = None, finished: bool = False) -> dict[str, Any] | None:
@@ -1222,6 +1756,7 @@ class SaaSService:
             return self._finish_queue_failure(queue_item, execution, error_type, message)
         delay = [30, 120, 300][min(max(attempts - 1, 0), 2)]
         self.storage.update_by_id("executions", execution["id"], {"status": "queued", "stage": "retry_waiting", "error_type": error_type, "error_message": message}, tenant_id=execution["tenant_id"])
+        log_context(self.logger, tenant_id=execution["tenant_id"], campaign_id=execution.get("campaign_id"), execution_id=execution["id"], queue_item_id=queue_item["id"]).warning("queue item scheduled for retry", extra={"attempt_count": attempts, "max_attempts": max_attempts, "delay_seconds": delay, "error_type": error_type})
         return self.storage.update_by_id("execution_queue_items", queue_item["id"], {"status": "retry_waiting", "run_after": utc_now() + timedelta(seconds=delay), "error_type": error_type, "error_message": message}, tenant_id=execution["tenant_id"]) or queue_item
 
     def _finish_queue_error(self, queue_item: dict[str, Any], execution: dict[str, Any], error_type: str, message: str) -> dict[str, Any]:
@@ -1237,6 +1772,7 @@ class SaaSService:
         updated = self.storage.update_by_id("executions", execution["id"], {"status": "failed", "stage": "failed", "error_type": error_type, "error_message": message, "finished_at": now, "progress_percent": 100}, tenant_id=execution["tenant_id"])
         if updated:
             self.notifications.execution_finished(updated)
+        log_context(self.logger, tenant_id=execution["tenant_id"], campaign_id=execution.get("campaign_id"), execution_id=execution["id"], queue_item_id=queue_item["id"]).error("queue item failed", extra={"error_type": error_type})
         return self.storage.update_by_id("execution_queue_items", queue_item["id"], {"status": "failed", "finished_at": now, "error_type": error_type, "error_message": message}, tenant_id=execution["tenant_id"]) or queue_item
 
     def _cancel_queue_item(self, queue_item: dict[str, Any], execution: dict[str, Any]) -> dict[str, Any]:
@@ -1253,6 +1789,157 @@ class SaaSService:
             {"status": "cancelled", "finished_at": now},
             tenant_id=execution["tenant_id"],
         ) or queue_item
+
+    def _query_campaigns(self, context: TenantContext, filters: dict[str, Any], *, limit: int, offset: int) -> list[dict[str, Any]]:
+        clauses, values = self._campaign_filter_clauses(context, filters)
+        return self.storage.query_all(
+            f"SELECT * FROM campaigns WHERE {' AND '.join(clauses)} ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?",
+            [*values, limit, offset],
+        )
+
+    def _query_campaign_count(self, context: TenantContext, filters: dict[str, Any]) -> int:
+        clauses, values = self._campaign_filter_clauses(context, filters)
+        row = self.storage.query_one(f"SELECT COUNT(*) AS count FROM campaigns WHERE {' AND '.join(clauses)}", values)
+        return int(row["count"] if row else 0)
+
+    def _campaign_filter_clauses(self, context: TenantContext, filters: dict[str, Any]) -> tuple[list[str], list[Any]]:
+        clauses = ["tenant_id = ?", "deleted_at IS NULL"]
+        values: list[Any] = [context.tenant_id]
+        for column in ["status", "platform_account_id", "reply_mode"]:
+            value = filters.get(column)
+            if value:
+                clauses.append(f"{column} = ?")
+                values.append(value)
+        if filters.get("platform"):
+            account_ids = [
+                row["id"]
+                for row in self.storage.list(
+                    "platform_accounts",
+                    tenant_id=context.tenant_id,
+                    filters={"platform": filters["platform"]},
+                    limit=1000,
+                )
+            ]
+            if not account_ids:
+                clauses.append("1 = 0")
+            else:
+                placeholders = ", ".join("?" for _ in account_ids)
+                clauses.append(f"platform_account_id IN ({placeholders})")
+                values.extend(account_ids)
+        if filters.get("search"):
+            clauses.append("(LOWER(name) LIKE ? OR LOWER(COALESCE(description, '')) LIKE ?)")
+            search = f"%{str(filters['search']).lower()}%"
+            values.extend([search, search])
+        if filters.get("created_from"):
+            clauses.append("created_at >= ?")
+            values.append(filters["created_from"])
+        if filters.get("created_to"):
+            clauses.append("created_at < ?")
+            values.append(filters["created_to"])
+        return clauses, values
+
+    def _enrich_campaigns(self, context: TenantContext, campaigns: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        for campaign in campaigns:
+            campaign_id = campaign["id"]
+            account = self.storage.get_by_id("platform_accounts", campaign["platform_account_id"], tenant_id=context.tenant_id)
+            schedule = self.storage.find_one("campaign_schedules", {"tenant_id": context.tenant_id, "campaign_id": campaign_id})
+            last_execution = self.storage.query_one(
+                "SELECT * FROM executions WHERE tenant_id = ? AND campaign_id = ? ORDER BY created_at DESC LIMIT 1",
+                [context.tenant_id, campaign_id],
+            )
+            campaign["platform"] = account.get("platform") if account else None
+            campaign["platform_account_name"] = account.get("display_name") if account else None
+            campaign["keyword_count"] = self.storage.count("campaign_keywords", tenant_id=context.tenant_id, filters={"campaign_id": campaign_id})
+            campaign["lead_count"] = self.storage.count("leads", tenant_id=context.tenant_id, filters={"campaign_id": campaign_id})
+            campaign["pending_reply_count"] = self.storage.count("reply_candidates", tenant_id=context.tenant_id, filters={"campaign_id": campaign_id, "status": "pending_approval"})
+            campaign["last_execution_at"] = last_execution.get("started_at") if last_execution else None
+            campaign["next_run_at"] = schedule.get("next_run_at") if schedule else None
+            campaign["owner_name"] = None
+            campaign["schedule"] = schedule
+        return campaigns
+
+    def _query_leads(self, context: TenantContext, filters: dict[str, Any], *, limit: int, offset: int) -> list[dict[str, Any]]:
+        clauses, values = self._lead_filter_clauses(context, filters)
+        rows = self.storage.query_all(
+            f"SELECT * FROM leads WHERE {' AND '.join(clauses)} ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?",
+            [*values, limit, offset],
+        )
+        return [self._normalize_lead_row(row) for row in rows]
+
+    def _normalize_lead_row(self, row: dict[str, Any]) -> dict[str, Any]:
+        keywords = row.get("matched_search_keywords")
+        if isinstance(keywords, str):
+            try:
+                parsed = json.loads(keywords)
+            except json.JSONDecodeError:
+                parsed = []
+            row = {**row, "matched_search_keywords": parsed if isinstance(parsed, list) else []}
+        return row
+
+    def _query_lead_count(self, context: TenantContext, filters: dict[str, Any]) -> int:
+        clauses, values = self._lead_filter_clauses(context, filters)
+        row = self.storage.query_one(f"SELECT COUNT(*) AS count FROM leads WHERE {' AND '.join(clauses)}", values)
+        return int(row["count"] if row else 0)
+
+    def _lead_filter_clauses(self, context: TenantContext, filters: dict[str, Any]) -> tuple[list[str], list[Any]]:
+        clauses = ["tenant_id = ?"]
+        values: list[Any] = [context.tenant_id]
+        exact = {
+            "campaign_id": "campaign_id",
+            "platform": "platform",
+            "status": "status",
+            "rule_intent_level": "rule_intent_level",
+            "final_intent_level": "final_intent_level",
+            "manual_intent_level": "manual_intent_level",
+            "assigned_user_id": "assigned_user_id",
+            "reply_allowed": "reply_allowed",
+        }
+        if filters.get("intent_level") and not filters.get("final_intent_level"):
+            filters = {**filters, "final_intent_level": filters["intent_level"]}
+        for key, column in exact.items():
+            value = filters.get(key)
+            if value is not None and value != "":
+                clauses.append(f"{column} = ?")
+                values.append(value)
+        for key, column in [("created_from", "created_at"), ("created_to", "created_at")]:
+            value = filters.get(key)
+            if value:
+                clauses.append(f"{column} {'>=' if key.endswith('from') else '<'} ?")
+                values.append(value)
+        search = filters.get("search") or filters.get("keyword")
+        if search:
+            like = f"%{str(search).lower()}%"
+            clauses.append("(LOWER(COALESCE(comment_text, '')) LIKE ? OR LOWER(COALESCE(author_name, '')) LIKE ?)")
+            values.extend([like, like])
+        return clauses, values
+
+    def _require_lead(self, context: TenantContext, lead_id: str) -> dict[str, Any]:
+        lead = self.storage.get_by_id("leads", lead_id, tenant_id=context.tenant_id)
+        if not lead:
+            raise PermissionError("lead not found")
+        return lead
+
+    def _require_tenant_user(self, context: TenantContext, user_id: str) -> dict[str, Any]:
+        membership = self.storage.find_one("tenant_users", {"tenant_id": context.tenant_id, "user_id": user_id})
+        user = self.storage.get_by_id("users", user_id)
+        if not membership or not user or user.get("status") != "active":
+            raise PermissionError("user not found")
+        return user
+
+    def _validate_lead_transition(self, current: str, target: str) -> None:
+        if current == target:
+            return
+        allowed = {
+            "new": {"open", "assigned", "contacted", "qualified", "invalid", "archived"},
+            "open": {"assigned", "contacted", "qualified", "invalid", "archived"},
+            "assigned": {"open", "contacted", "qualified", "invalid", "archived"},
+            "contacted": {"qualified", "invalid", "archived"},
+            "qualified": {"contacted", "archived"},
+            "invalid": {"archived"},
+            "archived": set(),
+        }
+        if target not in allowed.get(current, set()):
+            raise ServiceConflictError("invalid_lead_status_transition")
 
     def _require_campaign(self, context: TenantContext, campaign_id: str) -> dict[str, Any]:
         campaign = self.storage.get_by_id("campaigns", campaign_id, tenant_id=context.tenant_id)
@@ -1463,6 +2150,15 @@ def _public_user(user: dict[str, Any]) -> dict[str, Any]:
     return {key: value for key, value in user.items() if key != "password_hash"}
 
 
+def _email_domain(email: str) -> str:
+    _, separator, domain = str(email or "").lower().partition("@")
+    return domain if separator and domain else "unknown"
+
+
+def _non_empty_keys(values: dict[str, Any]) -> list[str]:
+    return sorted(key for key, value in values.items() if value is not None and value != "")
+
+
 def _as_datetime(value: Any) -> datetime | None:
     if isinstance(value, datetime):
         return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
@@ -1577,6 +2273,27 @@ class ServiceConflictError(RuntimeError):
 
 def _safe_limit(limit: int) -> int:
     return min(max(int(limit), 1), 200)
+
+
+def _artifact_type(path: Path) -> str:
+    suffix = path.suffix.lower()
+    if suffix in {".png", ".jpg", ".jpeg", ".webp"}:
+        return "screenshot"
+    if suffix in {".log", ".txt", ".jsonl"}:
+        return "log"
+    return "file"
+
+
+def _redact_sensitive(text: str) -> str:
+    patterns = [
+        (r"(?i)(cookie|authorization|x-csrf-token|access[_-]?token|refresh[_-]?token|password)\s*[:=]\s*[^,\s;]+", r"\1=[REDACTED]"),
+        (r"(?i)(Bearer)\s+[A-Za-z0-9._~+/=-]+", r"\1 [REDACTED]"),
+        (r"(?i)(c_user|xs|fr|datr)=[^;\s]+", r"\1=[REDACTED]"),
+    ]
+    redacted = text
+    for pattern, replacement in patterns:
+        redacted = re.sub(pattern, replacement, redacted)
+    return redacted
 
 
 def _preview_template_values() -> dict[str, str]:

@@ -65,6 +65,7 @@ class FacebookLeadsRunConfig:
     dry_run: bool = False
     resume_run_id: str | None = None
     target_policy: TargetPolicyConfig = field(default_factory=build_target_policy_config)
+    custom_positive_keywords: tuple[str, ...] = ()
 
 
 @dataclass
@@ -293,7 +294,7 @@ async def default_scan(config: FacebookLeadsRunConfig, run_dir: Path) -> dict[st
         cdp_url=config.cdp_url,
     )
     scan_payload = await run_cli_scan(scan_args)
-    report = build_lead_report(scan_payload)
+    report = build_lead_report(scan_payload, custom_positive_keywords=config.custom_positive_keywords)
     report_paths = write_lead_report_files(report, run_dir)
     lead_report_json = Path(report_paths["lead_report_json"])
     annotated = annotate_report_targets(_read_json_if_exists(lead_report_json), config.target_policy)

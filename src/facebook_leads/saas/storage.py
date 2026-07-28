@@ -17,7 +17,7 @@ from sqlalchemy.orm import Session, sessionmaker
 from .db import TABLES, create_saas_engine, make_session_factory, metadata, resolve_database_url, utc_now
 from .repositories import LeadRepository, QueueRepository
 
-CURRENT_SCHEMA_REVISION = "009_remove_database_foreign_keys"
+CURRENT_SCHEMA_REVISION = "010_frontend_crud_support"
 
 
 class SaaSStorage:

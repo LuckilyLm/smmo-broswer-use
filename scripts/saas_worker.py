@@ -23,19 +23,16 @@ from src.facebook_leads.saas.runtime import BrowserRuntimeRegistry
 
 def build_worker_service(config: ProductionConfig | None = None) -> SaaSService:
     config = config or ProductionConfig.from_env()
-    if config.runtime_host == "windows-agent":
-        raise RuntimeError("windows-agent runtime host is not implemented: browser_runtime_host_unavailable")
     if not config.runtime_available:
         raise RuntimeError("browser_runtime_host_unavailable")
     storage = SaaSStorage(config.database_url, create_schema=False)
     registry = BrowserRuntimeRegistry(
         storage,
         profiles_root=config.browser_profile_root,
-        chrome_executable=config.chrome_executable,
         cdp_port_start=config.browser_cdp_port_start,
         cdp_port_end=config.browser_cdp_port_end,
         runtime_host=config.runtime_host,
-        allow_chrome_discovery=not config.is_production,
+        allow_chrome_discovery=True,
     )
     return SaaSService(
         storage,

@@ -2,7 +2,7 @@ name: browser-use-webui
 
 x-saas-env: &saas-env
   SAAS_ENV: production
-  SAAS_DEPLOYMENT_MODE: ${SAAS_DEPLOYMENT_MODE:-control-plane-only}
+  SAAS_DEPLOYMENT_MODE: ${SAAS_DEPLOYMENT_MODE:-browser-use}
   DATABASE_URL: ${SAAS_DATABASE_URL:?SAAS_DATABASE_URL is required}
   SESSION_SECRET: ${SESSION_SECRET:?SESSION_SECRET is required}
   SAAS_ALLOWED_ORIGINS: ${SAAS_ALLOWED_ORIGINS:?SAAS_ALLOWED_ORIGINS is required}
@@ -14,7 +14,9 @@ x-saas-env: &saas-env
   SAAS_BROWSER_PROFILE_ROOT: ${SAAS_BROWSER_PROFILE_ROOT:-/data/browser_profiles}
   SAAS_BROWSER_CDP_PORT_START: ${SAAS_BROWSER_CDP_PORT_START:-9300}
   SAAS_BROWSER_CDP_PORT_END: ${SAAS_BROWSER_CDP_PORT_END:-9399}
-  SAAS_CHROME_EXECUTABLE: ${SAAS_CHROME_EXECUTABLE:-}
+  SAAS_BROWSER_HEADLESS: ${SAAS_BROWSER_HEADLESS:-false}
+  SAAS_ENABLE_NOVNC: ${SAAS_ENABLE_NOVNC:-true}
+  DISPLAY: ${DISPLAY:-:99}
   SAAS_BROWSER_IDLE_TIMEOUT_MINUTES: ${SAAS_BROWSER_IDLE_TIMEOUT_MINUTES:-30}
   SAAS_MAX_QUEUED_EXECUTIONS_PER_TENANT: ${SAAS_MAX_QUEUED_EXECUTIONS_PER_TENANT:-50}
   SAAS_WORKER_CONCURRENCY: ${SAAS_WORKER_CONCURRENCY:-1}
@@ -33,6 +35,22 @@ x-saas-env: &saas-env
   SAAS_TRUST_PROXY: ${SAAS_TRUST_PROXY:-false}
   SAAS_LLM_INPUT_COST_PER_1M: ${SAAS_LLM_INPUT_COST_PER_1M:-}
   SAAS_LLM_OUTPUT_COST_PER_1M: ${SAAS_LLM_OUTPUT_COST_PER_1M:-}
+  SAAS_LLM_ENDPOINT: ${SAAS_LLM_ENDPOINT:-}
+  SAAS_LLM_MODEL: ${SAAS_LLM_MODEL:-}
+  OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+  FACEBOOK_LEADS_LLM_PROVIDER: ${FACEBOOK_LEADS_LLM_PROVIDER:-openai}
+  FACEBOOK_LEADS_LLM_BASE_URL: ${SAAS_LLM_ENDPOINT:-}
+  FACEBOOK_LEADS_LLM_API_KEY: ${OPENAI_API_KEY:-}
+  FACEBOOK_LEADS_LLM_MODEL: ${SAAS_LLM_MODEL:-gpt-5.5}
+  SAAS_ARTIFACT_S3_ENABLED: ${SAAS_ARTIFACT_S3_ENABLED:-false}
+  SAAS_ARTIFACT_S3_ENDPOINT: ${SAAS_ARTIFACT_S3_ENDPOINT:-}
+  SAAS_ARTIFACT_S3_ACCESS_KEY: ${SAAS_ARTIFACT_S3_ACCESS_KEY:-}
+  SAAS_ARTIFACT_S3_SECRET_KEY: ${SAAS_ARTIFACT_S3_SECRET_KEY:-}
+  SAAS_ARTIFACT_S3_BUCKET: ${SAAS_ARTIFACT_S3_BUCKET:-}
+  SAAS_ARTIFACT_S3_REGION: ${SAAS_ARTIFACT_S3_REGION:-us-east-1}
+  SAAS_ARTIFACT_S3_PREFIX: ${SAAS_ARTIFACT_S3_PREFIX:-saas-artifacts}
+  SAAS_ARTIFACT_S3_PUBLIC_BASE_URL: ${SAAS_ARTIFACT_S3_PUBLIC_BASE_URL:-}
+  SAAS_ARTIFACT_S3_SECURE: ${SAAS_ARTIFACT_S3_SECURE:-true}
   APP_VERSION: ${APP_VERSION:-7.6.0}
   GIT_COMMIT: ${GIT_COMMIT:-unknown}
   BUILD_TIME: ${BUILD_TIME:-unknown}
@@ -91,7 +109,12 @@ services:
 
   saas-api:
     <<: *saas-app
-    command: ["uvicorn", "src.facebook_leads.saas.api:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "1"]
+    command: ["sh", "-lc", "uvicorn src.facebook_leads.saas.api:app --host 0.0.0.0 --port 8000 --workers 1 & python scripts/saas_worker.py --worker-id api-worker --poll-seconds 5"]
+    ports:
+      - "127.0.0.1:${SAAS_NOVNC_PORT:-6080}:6080"
+    volumes:
+      - browser_profiles:/data/browser_profiles
+      - saas_artifacts:/app/artifacts/saas
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/health', timeout=3)"]
       interval: 10s
@@ -122,6 +145,8 @@ services:
         VITE_GIT_COMMIT: ${GIT_COMMIT:-unknown}
     ports:
       - "127.0.0.1:${SAAS_FRONTEND_PORT:-8080}:80"
+    environment:
+      SAAS_API_UPSTREAM: ${SAAS_API_UPSTREAM:-http://saas-api:8000}
     depends_on:
       saas-api:
         condition: service_healthy

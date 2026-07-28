@@ -6,6 +6,7 @@ import os
 import subprocess
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from urllib.parse import urlparse
 
 import pytest
 
@@ -18,9 +19,16 @@ from src.facebook_leads.saas.worker import ExecutionWorker
 
 
 TEST_DATABASE_URL = os.getenv("TEST_DATABASE_URL")
+_TEST_URL = urlparse(TEST_DATABASE_URL or "")
+_TEST_DB_NAME = (_TEST_URL.path or "").rsplit("/", 1)[-1]
+_TEST_HOST = _TEST_URL.hostname or ""
 pytestmark = pytest.mark.skipif(
-    not TEST_DATABASE_URL or TEST_DATABASE_URL == os.getenv("DATABASE_URL") or "test" not in TEST_DATABASE_URL.rsplit("/", 1)[-1],
-    reason="TEST_DATABASE_URL must point to a dedicated PostgreSQL test database",
+    not TEST_DATABASE_URL
+    or TEST_DATABASE_URL == os.getenv("DATABASE_URL")
+    or not _TEST_DB_NAME.endswith("_test")
+    or os.getenv("ALLOW_DESTRUCTIVE_DATABASE_TESTS") != "true"
+    or _TEST_HOST not in {"127.0.0.1", "localhost", "::1"},
+    reason="TEST_DATABASE_URL must point to a dedicated local PostgreSQL *_test database and ALLOW_DESTRUCTIVE_DATABASE_TESTS=true",
 )
 
 
@@ -68,7 +76,7 @@ class FakeRuntimeRegistry:
             {
                 "tenant_id": context.tenant_id,
                 "platform_account_id": account_id,
-                "runtime_type": "local_chrome_cdp",
+                "runtime_type": "browser_use_chromium_cdp",
                 "status": "running",
                 "profile_path": str(self.tmp_path / context.tenant_id / account_id / "profile"),
                 "cdp_port": self.next_port,
@@ -159,7 +167,7 @@ def migrated_clean_database():
     env = {**os.environ, "DATABASE_URL": TEST_DATABASE_URL or ""}
     subprocess.run(["py", "-m", "alembic", "upgrade", "head"], check=True, cwd=Path.cwd(), env=env)
     storage = SaaSStorage(TEST_DATABASE_URL, create_schema=False)
-    for table in ["worker_heartbeats", "token_usage", "reply_records", "reply_candidates", "reply_plans", "reply_match_rules", "reply_templates", "execution_keywords", "execution_queue_items", "sessions", "executions", "leads", "reply_rules", "campaign_keywords", "campaign_schedules", "campaigns", "browser_runtimes", "platform_accounts", "tenant_users", "users", "tenants"]:
+    for table in ["worker_heartbeats", "token_usage", "reply_records", "reply_candidates", "reply_plans", "reply_match_rules", "reply_templates", "execution_keywords", "execution_queue_items", "sessions", "executions", "lead_notes", "leads", "reply_rules", "campaign_keywords", "campaign_schedules", "campaigns", "browser_runtimes", "platform_accounts", "tenant_users", "users", "tenants"]:
         storage.execute(f"DELETE FROM {table}")
     yield
 
@@ -239,3 +247,88 @@ def test_postgres_two_workers_claim_once_and_runtime_lock_is_cross_process(tmp_p
     second_lock = storage_b.acquire_runtime_lock("runtime-claim-once")
     assert second_lock is not None
     storage_b.release_runtime_lock(second_lock)
+
+
+def test_postgres_campaign_detail_lead_crud_and_execution_artifacts(tmp_path):
+    service = make_postgres_service(tmp_path)
+    ctx, _account, campaign = create_workspace(service, slug="crud-a")
+    lead = service.storage.insert(
+        "leads",
+        {
+            "tenant_id": ctx.tenant_id,
+            "campaign_id": campaign["id"],
+            "platform_account_id": campaign["platform_account_id"],
+            "platform": "facebook",
+            "comment_fingerprint": "crud-fp",
+            "comment_text": "How much?",
+            "author_name": "Buyer",
+            "final_intent_level": "high",
+            "reply_allowed": True,
+            "discovered_at": "2026-07-27T00:00:00+00:00",
+        },
+    )
+    execution = service.storage.insert(
+        "executions",
+        {
+            "tenant_id": ctx.tenant_id,
+            "campaign_id": campaign["id"],
+            "platform": "facebook",
+            "status": "failed",
+            "trigger_type": "manual",
+            "error_type": "cdp_unreachable",
+            "send_disabled": True,
+        },
+    )
+    artifact_root = tmp_path / "artifacts" / "tenants" / ctx.tenant_id / "executions" / execution["id"]
+    artifact_root.mkdir(parents=True)
+    (artifact_root / "worker.log").write_text("Authorization: Bearer secret-token\nCookie: c_user=123; xs=abc\nok", encoding="utf-8")
+    (artifact_root / "screen.png").write_bytes(b"png")
+
+    detail = service.get_campaign_detail(ctx, campaign["id"])
+    assigned = service.assign_lead(ctx, lead["id"], ctx.user_id)
+    note = service.create_lead_note(ctx, lead["id"], {"note": "Call back"})
+    contacted = service.mark_lead_contacted(ctx, lead["id"])
+    retried = service.retry_execution(ctx, execution["id"])
+    logs = service.execution_logs(ctx, execution["id"])
+    screenshots = service.execution_artifacts(ctx, execution["id"], artifact_type="screenshot")
+
+    assert detail["leads_count"] == 1
+    assert assigned["status"] == "assigned"
+    assert note["lead_id"] == lead["id"]
+    assert contacted["status"] == "contacted"
+    assert retried["send_disabled"] is True
+    assert "[REDACTED]" in "\n".join(row["line"] for row in logs["items"])
+    assert screenshots["items"][0]["type"] == "screenshot"
+
+
+def test_postgres_cross_tenant_lead_rejection_and_completed_retry_guard(tmp_path):
+    service = make_postgres_service(tmp_path)
+    ctx_a, _account_a, campaign_a = create_workspace(service, slug="crud-guard-a")
+    ctx_b, _account_b, _campaign_b = create_workspace(service, slug="crud-guard-b")
+    lead = service.storage.insert(
+        "leads",
+        {
+            "tenant_id": ctx_a.tenant_id,
+            "campaign_id": campaign_a["id"],
+            "platform_account_id": campaign_a["platform_account_id"],
+            "platform": "facebook",
+            "comment_fingerprint": "guard-fp",
+            "discovered_at": "2026-07-27T00:00:00+00:00",
+        },
+    )
+    completed = service.storage.insert(
+        "executions",
+        {
+            "tenant_id": ctx_a.tenant_id,
+            "campaign_id": campaign_a["id"],
+            "platform": "facebook",
+            "status": "completed",
+            "trigger_type": "manual",
+            "send_disabled": True,
+        },
+    )
+
+    with pytest.raises(PermissionError):
+        service.update_lead(ctx_b, lead["id"], {"status": "open"})
+    with pytest.raises(Exception, match="execution_not_retryable"):
+        service.retry_execution(ctx_a, completed["id"])

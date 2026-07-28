@@ -123,6 +123,8 @@ celerybeat.pid
 
 # Environments
 .env
+.env.*
+!.env.*.example
 .venv
 env/
 venv/
@@ -210,3 +212,5 @@ web/saas-dashboard/AGENTS.md
 web/saas-dashboard/CLAUDE.md
 web/saas-dashboard/pnpm-lock.yaml
 web/saas-dashboard/src/imports/
+!web/saas-dashboard/src/lib/
+!web/saas-dashboard/src/lib/**

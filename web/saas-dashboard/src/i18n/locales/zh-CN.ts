@@ -471,9 +471,8 @@ export const zhCN = {
       unknown: "未知"
     },
     runtimeType: {
-      local: "本机运行",
-      local_chrome_cdp: "本机浏览器",
-      windows_host: "Windows 浏览器运行节点",
+      local: "容器运行",
+      browser_use_chromium_cdp: "browser-use Chromium",
       unknown: "未知"
     },
     auditResource: {
