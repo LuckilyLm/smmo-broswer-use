@@ -52,16 +52,30 @@ async def get_active_page(browser_context: Any) -> Any:
 
 async def select_active_or_facebook_page(browser_context: Any) -> Any:
     page = await get_active_page(browser_context)
+    pages = await list_context_pages(browser_context)
+    open_pages = [candidate for candidate in pages if not _is_page_closed(candidate)]
+    signed_in_candidates = [
+        candidate
+        for candidate in open_pages
+        if _is_facebook_page_url(getattr(candidate, "url", "")) and not await _has_login_form(candidate)
+    ]
+
+    if page in signed_in_candidates:
+        return page
+
+    for candidate in signed_in_candidates:
+        url = getattr(candidate, "url", "")
+        if _is_facebook_content_page_url(url):
+            return candidate
+    for candidate in signed_in_candidates:
+        return candidate
+
     if _is_facebook_page_url(getattr(page, "url", "")):
         return page
 
-    for candidate in await list_context_pages(browser_context):
+    for candidate in open_pages:
         url = getattr(candidate, "url", "")
-        if _is_facebook_content_page_url(url) and not _is_page_closed(candidate):
-            return candidate
-    for candidate in await list_context_pages(browser_context):
-        url = getattr(candidate, "url", "")
-        if _is_facebook_page_url(url) and not _is_page_closed(candidate):
+        if _is_facebook_page_url(url):
             return candidate
     return page
 
@@ -100,6 +114,16 @@ async def verify_page_primitives(page: Any, goto_url: str | None = None) -> dict
 
 def _is_page_closed(page: Any) -> bool:
     return bool(page.is_closed()) if hasattr(page, "is_closed") else False
+
+
+async def _has_login_form(page: Any) -> bool:
+    for selector in ("input[name='email']", "input[name='pass']", "form[action*='login']", "[data-testid='royal_login_button']"):
+        try:
+            if await page.locator(selector).count() > 0:
+                return True
+        except Exception:
+            continue
+    return False
 
 
 def _is_facebook_page_url(url: str) -> bool:

@@ -14,21 +14,26 @@ from src.facebook_leads.browser_adapter import (
 
 
 class FakePage:
-    def __init__(self, url: str, title: str = "Title", closed: bool = False):
+    def __init__(self, url: str, title: str = "Title", closed: bool = False, selectors: dict[str, int] | None = None):
         self.url = url
         self._title = title
         self._closed = closed
+        self._selectors = selectors or {}
+        self._selector = "body"
         self.goto_calls: list[str] = []
 
     async def title(self):
         return self._title
 
     def locator(self, selector):
-        assert selector == "body"
-        return self
+        located = FakePage(self.url, self._title, self._closed, self._selectors)
+        located._selector = selector
+        return located
 
     async def count(self):
-        return 1
+        if self._selector == "body":
+            return 1
+        return self._selectors.get(self._selector, 0)
 
     async def goto(self, url):
         self.goto_calls.append(url)
@@ -112,6 +117,14 @@ def test_select_active_or_facebook_page_falls_back_to_any_facebook_page():
     context = FakeBrowserContext([active_page, facebook_home], active_page)
 
     assert asyncio.run(select_active_or_facebook_page(context)) is facebook_home
+
+
+def test_select_active_or_facebook_page_skips_login_form_when_signed_in_page_exists():
+    login_page = FakePage("https://www.facebook.com/", selectors={"input[name='email']": 1, "input[name='pass']": 1})
+    signed_in_home = FakePage("https://www.facebook.com/")
+    context = FakeBrowserContext([login_page, signed_in_home], login_page)
+
+    assert asyncio.run(select_active_or_facebook_page(context)) is signed_in_home
 
 
 def test_page_primitives_support_title_locator_and_optional_goto():
