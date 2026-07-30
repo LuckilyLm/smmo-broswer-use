@@ -2,11 +2,47 @@ import { useEffect, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { useParams } from 'react-router-dom'
 import { AlertTriangle, ChevronRight, Plus, Trash2 } from 'lucide-react'
-import { useCampaign, useCreateCampaign, useUpdateCampaign, type CampaignPayload } from '../api/campaigns'
+import { useCampaign, useCreateCampaign, useUpdateCampaign, type CampaignPayload, type CampaignTargetPolicy } from '../api/campaigns'
+import { useMatchingRules } from '../api/matching-rules'
 import { usePlatformAccounts } from '../api/platform-accounts'
 import { useReplyTemplates } from '../api/reply-templates'
 import StickySaveBar, { type SaveState } from '../components/ui/StickySaveBar'
 
+
+const targetPolicyOptions: Array<{ value: CampaignTargetPolicy; label: string; description: string }> = [
+  { value: 'discovery_only', label: '仅发现', description: '只收集和识别线索，不允许发送回复' },
+  { value: 'owned_only', label: '仅自有来源', description: '仅允许回复归属当前账号的内容' },
+  { value: 'allowlist', label: '白名单来源', description: '仅允许回复运行环境白名单中的来源' },
+]
+
+export function buildReplyPreflightWarnings({
+  replyMode,
+  targetPolicy,
+  selectedTemplateId,
+  selectedAccount,
+  keywordCount,
+  enabledRuleCount,
+}: {
+  replyMode: 'off' | 'manual' | 'auto'
+  targetPolicy: CampaignTargetPolicy
+  selectedTemplateId: string
+  selectedAccount?: { login_status: string; connection_status: string; runtime_status: string }
+  keywordCount: number
+  enabledRuleCount: number
+}) {
+  if (replyMode === 'off') return []
+  const warnings: string[] = []
+  if (targetPolicy === 'discovery_only') warnings.push('当前为“仅发现”：系统会识别线索，但所有回复都会被来源策略阻止。')
+  if (!selectedTemplateId) warnings.push('尚未绑定默认回复模板，且匹配规则可能无法生成回复内容。')
+  if (enabledRuleCount === 0) warnings.push('当前活动没有已启用的匹配规则，请先配置规则再开启回复。')
+  if (keywordCount === 0) warnings.push('尚未配置搜索关键词，活动无法发现目标内容。')
+  if (!selectedAccount) warnings.push('尚未绑定平台账号。')
+  else {
+    if (selectedAccount.connection_status !== 'connected' || selectedAccount.login_status !== 'logged_in') warnings.push('绑定账号尚未连接并登录，请先完成账号检查。')
+    if (selectedAccount.runtime_status !== 'running') warnings.push('绑定账号的浏览器运行时未运行，请先启动或重启运行时。')
+  }
+  return warnings
+}
 
 const sections = [
   { id: 'basic', label: '基础信息' },
@@ -31,6 +67,7 @@ export default function CampaignSettings({ onNavigate }: CampaignSettingsProps) 
   const { data: platformAccounts = [] } = usePlatformAccounts()
   const { data: templates = [] } = useReplyTemplates()
   const { data: campaignDetail } = useCampaign(campaignId || '')
+  const { data: matchingRules = [] } = useMatchingRules(campaignId || undefined)
   const createCampaign = useCreateCampaign()
   const updateCampaign = useUpdateCampaign()
   const [activeSection, setActiveSection] = useState('basic')
@@ -39,37 +76,26 @@ export default function CampaignSettings({ onNavigate }: CampaignSettingsProps) 
   const [llmEnabled, setLlmEnabled] = useState(false)
   const [hasChanges, setHasChanges] = useState(false)
   const [saveState, setSaveState] = useState<SaveState>('idle')
-  const [keywords, setKeywords] = useState(['跨境电商', '独立站', '代购', '海淘', '采购'])
+  const [keywords, setKeywords] = useState<string[]>([])
   const [errors, setErrors] = useState<Record<string, string>>({})
   const [navOpen, setNavOpen] = useState(false)
   const [selectedAccountId, setSelectedAccountId] = useState('')
   const [selectedTemplateId, setSelectedTemplateId] = useState('')
+  const [targetPolicy, setTargetPolicy] = useState<CampaignTargetPolicy>('discovery_only')
 
   const [formValues, setFormValues] = useState({
-    name: '跨境电商引流 – Facebook',
-    description: '针对 Facebook 跨境电商兴趣用户，通过关键词匹配挖掘潜在买家。',
-    region: '东南亚、欧美',
-    whatsapp: '+86 138 xxxx xxxx',
-    email: 'sales@company.com',
-    website: 'https://www.company.com',
-    contact: '欢迎添加微信咨询',
-    dailyLimit: '50',
+    name: '',
+    description: '',
+    region: '',
+    whatsapp: '',
+    email: '',
+    website: '',
+    contact: '',
+    dailyLimit: '30',
     hourlyLimit: '10',
-    minuteLimit: '2',
-    intervalSecs: '30',
+    minuteLimit: '1',
+    intervalSecs: '60',
   })
-
-  useEffect(() => {
-    if (!selectedAccountId && platformAccounts.length > 0) {
-      setSelectedAccountId(platformAccounts[0].id)
-    }
-  }, [platformAccounts, selectedAccountId])
-
-  useEffect(() => {
-    if (!selectedTemplateId && templates.length > 0) {
-      setSelectedTemplateId(templates[0].id)
-    }
-  }, [selectedTemplateId, templates])
 
   useEffect(() => {
     if (!campaignDetail) return
@@ -92,6 +118,7 @@ export default function CampaignSettings({ onNavigate }: CampaignSettingsProps) 
     setLeadMode(campaignDetail.lead_detection_mode === 'rules_with_llm' ? 'hybrid' : 'rules')
     setLlmEnabled(Boolean(campaignDetail.llm_enabled))
     setSelectedTemplateId(campaignDetail.default_reply_template_id || '')
+    setTargetPolicy(campaignDetail.target_policy || 'discovery_only')
   }, [campaignDetail])
 
   const setField = (key: string, value: string) => {
@@ -109,6 +136,16 @@ export default function CampaignSettings({ onNavigate }: CampaignSettingsProps) 
     return e
   }
 
+  const selectedAccount = platformAccounts.find((account) => account.id === selectedAccountId)
+  const preflightWarnings = buildReplyPreflightWarnings({
+    replyMode,
+    targetPolicy,
+    selectedTemplateId,
+    selectedAccount,
+    keywordCount: keywords.filter((keyword) => keyword.trim()).length,
+    enabledRuleCount: campaignId ? matchingRules.filter((rule) => rule.status === 'active' && rule.campaign_id === campaignId).length : 0,
+  })
+
   const handleSave = async () => {
     const e = validate()
     if (Object.keys(e).length > 0) { setErrors(e); return }
@@ -123,7 +160,7 @@ export default function CampaignSettings({ onNavigate }: CampaignSettingsProps) 
       description: formValues.description.trim() || null,
       platform_account_id: platformAccountId,
       status: 'active',
-      target_policy: 'discovery_only',
+      target_policy: targetPolicy,
       max_contents: 2,
       max_comments: 30,
       min_confidence: leadMode === 'rules' ? 0.75 : 0.7,
@@ -236,7 +273,7 @@ export default function CampaignSettings({ onNavigate }: CampaignSettingsProps) 
                   {platformAccounts.length === 0 && <option value="">暂无平台账号</option>}
                   {platformAccounts.map((account) => (
                     <option key={account.id} value={account.id}>
-                      {account.display_name}（{account.platform} · {account.login_status}）
+                      {account.display_name}（{account.platform} · {account.login_status === 'logged_in' ? '已登录' : account.login_status === 'login_required' ? '需要登录' : '登录状态未知'} · {account.runtime_status === 'running' ? '运行中' : account.runtime_status === 'starting' ? '启动中' : account.runtime_status === 'unhealthy' ? '运行异常' : '已停止'}）
                     </option>
                   ))}
                 </select>
@@ -271,6 +308,24 @@ export default function CampaignSettings({ onNavigate }: CampaignSettingsProps) 
             </Section>
 
             <Section id="strategy" title="目标内容策略">
+              <Field label="来源回复策略" hint="决定哪些来源可发送回复；此设置会随活动保存。">
+                <div className="grid gap-2 md:grid-cols-3">
+                  {targetPolicyOptions.map((option) => (
+                    <label key={option.value} className="cursor-pointer rounded-lg border p-3" style={{ borderColor: targetPolicy === option.value ? 'var(--primary)' : 'var(--border)', background: targetPolicy === option.value ? 'var(--accent)' : 'white' }}>
+                      <div className="flex items-center gap-2 text-sm font-medium text-gray-800">
+                        <input type="radio" name="targetPolicy" value={option.value} checked={targetPolicy === option.value} onChange={() => { setTargetPolicy(option.value); setHasChanges(true) }} />
+                        {option.label}
+                      </div>
+                      <p className="mt-1 text-xs text-gray-500">{option.description}</p>
+                    </label>
+                  ))}
+                </div>
+                {(targetPolicy === 'owned_only' || targetPolicy === 'allowlist') && (
+                  <div className="mt-2 rounded-lg border border-blue-200 bg-blue-50 p-3 text-xs text-blue-700">
+                    当前活动数据模型只持久化来源策略，不包含自有来源 ID 或白名单 URL 字段。请在运行环境中配置对应来源清单；本页面不会创建或伪造这些字段。
+                  </div>
+                )}
+              </Field>
               <Field label="扫描内容类型">
                 <div className="flex flex-col gap-2">
                   {['帖子评论', '视频评论', '话题讨论', '产品评测'].map((t) => (
@@ -349,6 +404,14 @@ export default function CampaignSettings({ onNavigate }: CampaignSettingsProps) 
                   <div className="mt-2 flex items-start gap-2 p-3 rounded-lg border" style={{ background: '#fffbeb', borderColor: '#fcd34d' }}>
                     <AlertTriangle size={14} className="text-amber-500 shrink-0 mt-0.5" />
                     <div className="text-xs text-amber-700">自动执行模式将在系统级发送开关开启时直接发送回复，无需人工审批。请谨慎使用。</div>
+                  </div>
+                )}
+                {preflightWarnings.length > 0 && (
+                  <div className="mt-2 rounded-lg border border-amber-200 bg-amber-50 p-3">
+                    <div className="flex items-center gap-1.5 text-xs font-semibold text-amber-800"><AlertTriangle size={13} />回复预检提示</div>
+                    <ul className="mt-1.5 list-disc space-y-1 pl-5 text-xs text-amber-700">
+                      {preflightWarnings.map((warning) => <li key={warning}>{warning}</li>)}
+                    </ul>
                   </div>
                 )}
               </Field>

@@ -11,6 +11,9 @@ x-saas-env: &saas-env
   SAAS_DB_MAX_OVERFLOW: ${SAAS_DB_MAX_OVERFLOW:-20}
   SAAS_DB_POOL_RECYCLE: ${SAAS_DB_POOL_RECYCLE:-1800}
   SAAS_RUNTIME_HOST: ${SAAS_RUNTIME_HOST:-local}
+  SAAS_BROWSER_CDP_BASE_URL: ${SAAS_BROWSER_CDP_BASE_URL:-}
+  SAAS_BROWSER_CDP_BIND_ADDRESS: ${SAAS_BROWSER_CDP_BIND_ADDRESS:-127.0.0.1}
+  SAAS_BROWSER_RUNTIME_CONTROL_URL: ${SAAS_BROWSER_RUNTIME_CONTROL_URL:-}
   SAAS_BROWSER_PROFILE_ROOT: ${SAAS_BROWSER_PROFILE_ROOT:-/data/browser_profiles}
   SAAS_BROWSER_CDP_PORT_START: ${SAAS_BROWSER_CDP_PORT_START:-9300}
   SAAS_BROWSER_CDP_PORT_END: ${SAAS_BROWSER_CDP_PORT_END:-9399}
@@ -63,7 +66,7 @@ x-logging: &saas-logging
     max-file: "10"
 
 x-app: &saas-app
-  image: browser-use-webui/saas-api:${GIT_COMMIT:-local}
+  image: browser-use-webui/saas-api:${SAAS_API_IMAGE_TAG:-${GIT_COMMIT:-local}}
   build:
     context: .
     dockerfile: deploy/docker/Dockerfile.saas
@@ -95,7 +98,7 @@ services:
     logging: *saas-logging
 
   saas-migrate:
-    image: browser-use-webui/saas-api:${GIT_COMMIT:-local}
+    image: browser-use-webui/saas-api:${SAAS_API_IMAGE_TAG:-${GIT_COMMIT:-local}}
     build:
       context: .
       dockerfile: deploy/docker/Dockerfile.saas
@@ -109,12 +112,18 @@ services:
 
   saas-api:
     <<: *saas-app
-    command: ["sh", "-lc", "uvicorn src.facebook_leads.saas.api:app --host 0.0.0.0 --port 8000 --workers 1 & python scripts/saas_worker.py --worker-id api-worker --poll-seconds 5"]
-    ports:
-      - "127.0.0.1:${SAAS_NOVNC_PORT:-6080}:6080"
+    command: ["uvicorn", "src.facebook_leads.saas.api:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "1"]
+    environment:
+      <<: *saas-env
+      SAAS_RUNTIME_HOST: remote
+      SAAS_BROWSER_CDP_BASE_URL: http://saas-browser-runtime
+      SAAS_BROWSER_RUNTIME_CONTROL_URL: http://saas-browser-runtime:8001
+      SAAS_ENABLE_NOVNC: "false"
     volumes:
-      - browser_profiles:/data/browser_profiles
       - saas_artifacts:/app/artifacts/saas
+    depends_on:
+      saas-migrate:
+        condition: service_completed_successfully
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/health', timeout=3)"]
       interval: 10s
@@ -123,11 +132,43 @@ services:
 
   saas-worker:
     <<: *saas-app
+    image: browser-use-webui/saas-worker:${SAAS_WORKER_IMAGE_TAG:-${GIT_COMMIT:-local}}
     command: ["python", "scripts/saas_worker.py"]
+    environment:
+      <<: *saas-env
+      SAAS_RUNTIME_HOST: remote
+      SAAS_BROWSER_CDP_BASE_URL: http://saas-browser-runtime
+      SAAS_BROWSER_RUNTIME_CONTROL_URL: http://saas-browser-runtime:8001
+      SAAS_ENABLE_NOVNC: "false"
     volumes:
       - browser_profiles:/data/browser_profiles
       - saas_artifacts:/app/artifacts/saas
-    profiles: ["future-runtime-agent"]
+    depends_on:
+      saas-migrate:
+        condition: service_completed_successfully
+      saas-browser-runtime:
+        condition: service_healthy
+
+  saas-browser-runtime:
+    <<: *saas-app
+    image: browser-use-webui/saas-browser-runtime:${SAAS_BROWSER_RUNTIME_IMAGE_TAG:-browser-runtime-local}
+    command: ["uvicorn", "src.facebook_leads.saas.browser_runtime_api:app", "--host", "0.0.0.0", "--port", "8001", "--workers", "1"]
+    environment:
+      <<: *saas-env
+      SAAS_RUNTIME_HOST: local
+      SAAS_BROWSER_CDP_BASE_URL: http://saas-browser-runtime
+      SAAS_BROWSER_CDP_BIND_ADDRESS: 127.0.0.1
+      SAAS_ENABLE_NOVNC: "true"
+    ports:
+      - "127.0.0.1:${SAAS_NOVNC_PORT:-6080}:6080"
+    volumes:
+      - browser_profiles:/data/browser_profiles
+      - saas_artifacts:/app/artifacts/saas
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8001/health', timeout=3)"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
 
   saas-scheduler:
     <<: *saas-app
@@ -135,7 +176,7 @@ services:
     profiles: ["automation"]
 
   frontend:
-    image: browser-use-webui/saas-frontend:${GIT_COMMIT:-local}
+    image: browser-use-webui/saas-frontend:${SAAS_FRONTEND_IMAGE_TAG:-${GIT_COMMIT:-local}}
     build:
       context: .
       dockerfile: deploy/docker/Dockerfile.saas-frontend

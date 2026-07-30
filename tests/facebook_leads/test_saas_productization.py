@@ -221,3 +221,16 @@ def test_execution_notification_failure_is_isolated(product, monkeypatch):
     monkeypatch.setattr(service.notifications, "create", lambda **_kwargs: (_ for _ in ()).throw(RuntimeError("notification unavailable")))
     service.notifications.execution_finished(execution)
     assert service.storage.get_by_id("executions", execution["id"])["status"] == "completed"
+
+
+def test_execution_finished_notification_uses_chinese_customer_copy(product):
+    service, tenant, _users, _memberships, _contexts = product
+    execution = service.storage.insert("executions", {"tenant_id": tenant["id"], "campaign_id": "camp_1", "platform": "facebook", "status": "completed", "send_disabled": True})
+
+    service.notifications.execution_finished(execution)
+
+    notification = service.storage.find_one("notifications", {"tenant_id": tenant["id"], "resource_id": execution["id"]})
+    assert notification["title"] == "任务执行已完成"
+    assert notification["message"] == "营销活动执行已结束，结果为：已完成。"
+    assert "Execution" not in notification["title"]
+    assert "Campaign execution" not in notification["message"]

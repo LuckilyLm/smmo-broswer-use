@@ -39,7 +39,21 @@ def test_production_config_reports_browser_use_runtime_capabilities(monkeypatch)
         "local_browser_supported": True,
         "browser_backend": "browser-use",
         "browser_headless": True,
+        "browser_cdp_base_url": "http://127.0.0.1",
     }
+
+
+def test_production_config_reports_remote_browser_runtime_capabilities(monkeypatch):
+    monkeypatch.setattr("src.facebook_leads.saas.config.platform.system", lambda: "Linux")
+    config = ProductionConfig.from_env(
+        {**PRODUCTION_ENV, "SAAS_DEPLOYMENT_MODE": "browser-use", "SAAS_RUNTIME_HOST": "remote"}
+    )
+
+    assert config.runtime_available is True
+    assert config.browser_cdp_base_url == "http://saas-browser-runtime"
+    assert config.browser_runtime_control_url == "http://saas-browser-runtime:8001"
+    assert config.runtime_capabilities()["runtime_host"] == "remote"
+    assert config.runtime_capabilities()["runtime_available"] is True
 
 
 def test_production_config_reports_linux_control_plane_only_capabilities(monkeypatch):
@@ -55,6 +69,7 @@ def test_production_config_reports_linux_control_plane_only_capabilities(monkeyp
         "local_browser_supported": True,
         "browser_backend": "browser-use",
         "browser_headless": True,
+        "browser_cdp_base_url": "http://127.0.0.1",
     }
 
 
@@ -238,6 +253,50 @@ def test_worker_and_scheduler_status_use_fresh_heartbeats(tmp_path):
     assert scheduler["last_tick_at"]
     assert scheduler["due_campaign_count"] == 0
     assert scheduler["last_error"] is None
+
+
+def test_system_dependencies_include_remote_browser_runtime_control_status(tmp_path, monkeypatch):
+    import src.facebook_leads.saas.routers.system as system_router
+
+    service = SaaSService(SaaSStorage(tmp_path / "dependencies.sqlite"))
+    tenant = service.create_tenant("Dependencies", "dependencies")
+    user = service.create_user("dependencies@example.com", "pass123456", "Admin")
+    service.add_user_to_tenant(tenant["id"], user["id"], role="admin")
+    token = service.login("dependencies@example.com", "pass123456")["access_token"]
+
+    class Response:
+        status = 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+    requested: list[str] = []
+
+    def fake_urlopen(url: str, timeout: int):
+        requested.append(f"{url}|{timeout}")
+        return Response()
+
+    monkeypatch.setattr(system_router, "urlopen", fake_urlopen)
+    config = ProductionConfig.from_env(
+        {**PRODUCTION_ENV, "SAAS_DEPLOYMENT_MODE": "browser-use", "SAAS_RUNTIME_HOST": "remote"}
+    )
+
+    response = TestClient(create_app(service=service, config=config)).get(
+        "/api/system/dependencies",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+
+    assert response.status_code == 200
+    runtime = response.json()["runtime"]
+    assert runtime["runtime_host"] == "remote"
+    assert runtime["browser_cdp_base_url"] == "http://saas-browser-runtime"
+    assert runtime["browser_runtime_control_url"] == "http://saas-browser-runtime:8001"
+    assert runtime["browser_runtime_control_reachable"] is True
+    assert runtime["browser_runtime_control_status"] == "ok"
+    assert requested == ["http://saas-browser-runtime:8001/health|2"]
 
 
 def test_stopped_worker_and_failed_scheduler_are_offline(tmp_path):

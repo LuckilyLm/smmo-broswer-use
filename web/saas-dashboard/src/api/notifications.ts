@@ -4,7 +4,8 @@ import { toast } from "sonner";
 
 export interface Notification {
   id: string;
-  type: "info" | "warning" | "error" | "success";
+  type: string;
+  severity?: "info" | "warning" | "error" | "success";
   title: string;
   message: string;
   read: boolean;

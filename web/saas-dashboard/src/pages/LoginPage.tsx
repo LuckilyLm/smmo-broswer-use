@@ -70,6 +70,8 @@ export default function LoginPage() {
                 <Mail className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
                 <Input
                   id="email"
+                  name="email"
+                  autoComplete="email"
                   type="email"
                   placeholder="your@email.com"
                   value={email}
@@ -90,6 +92,8 @@ export default function LoginPage() {
                 <Lock className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
                 <Input
                   id="password"
+                  name="password"
+                  autoComplete="current-password"
                   type="password"
                   placeholder="••••••••"
                   value={password}

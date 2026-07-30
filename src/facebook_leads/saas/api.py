@@ -110,6 +110,9 @@ def create_app(*, database_url: str | None = None, service: SaaSService | None =
             cdp_port_start=config.browser_cdp_port_start,
             cdp_port_end=config.browser_cdp_port_end,
             runtime_host=config.runtime_host,
+            cdp_base_url=config.browser_cdp_base_url,
+            cdp_bind_address=config.browser_cdp_bind_address,
+            remote_control_url=config.browser_runtime_control_url,
             browser_headless=config.browser_headless,
             allow_chrome_discovery=True,
         )

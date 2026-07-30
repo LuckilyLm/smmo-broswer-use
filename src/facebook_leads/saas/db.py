@@ -359,7 +359,7 @@ leads = Table(
     Column("llm_reason", Text),
     Column("suggested_reply", Text),
     Column("ownership_status", String(50)),
-    Column("reply_allowed", Boolean, nullable=False, default=False),
+    Column("reply_allowed", Boolean, nullable=True),
     Column("status", String(50), nullable=False, default="new"),
     Column("manual_intent_level", String(50)),
     Column("assigned_user_id", String(64)),

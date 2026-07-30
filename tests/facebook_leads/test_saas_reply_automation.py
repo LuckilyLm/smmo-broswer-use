@@ -175,6 +175,24 @@ def test_rule_matching_negative_priority_and_template_selection(service: SaaSSer
     assert "WhatsApp" in (candidate["rendered_reply_text"] or "") or "Contact" in (candidate["rendered_reply_text"] or "")
 
 
+def test_recommendation_context_matches_short_vendor_comments(service: SaaSService, ctx: TenantContext, campaign: dict):
+    result = match_comment(
+        {"text": "Silver Trays", "author_name": "Buyer", "fingerprint": "rec1", "keyword": "looking for supplier recommendations"},
+        campaign,
+        [],
+    )
+    assert result.matched
+    assert result.matched_rule == "recommendation_context"
+
+    blocked_campaign = service.update_campaign(ctx, campaign["id"], {"negative_keywords_json": ["fake"]}) or campaign
+    blocked = match_comment(
+        {"text": "fake supplier", "author_name": "Buyer", "fingerprint": "rec2", "keyword": "looking for supplier recommendations"},
+        blocked_campaign,
+        [],
+    )
+    assert blocked.blocked_reason == "negative_keyword"
+
+
 def test_manual_approval_guards_disabled_runtime_and_idempotency(service: SaaSService, ctx: TenantContext, campaign: dict):
     template = service.create_reply_template(ctx, {"name": "WhatsApp", "content": "My WhatsApp is {{whatsapp}}", "is_default": True})
     service.create_reply_match_rule(ctx, {"campaign_id": campaign["id"], "reply_template_id": template["id"], "name": "Contact", "contains_any_json": ["contact"]})
@@ -291,6 +309,67 @@ def test_template_renderer_rejects_missing_and_control_text():
         render_template("WhatsApp {{whatsapp}}", {})
     with pytest.raises(ValueError, match="template_content_invalid"):
         render_template("bad\x00text", {"whatsapp": "1"})
+
+
+def test_zero_candidate_plan_is_blocked_and_cannot_be_approved_or_executed(service: SaaSService, ctx: TenantContext, campaign: dict):
+    execution = _execution(service, ctx, campaign)
+    plan = service.generate_reply_plan_for_execution(ctx, execution["id"])
+
+    assert plan
+    assert plan["status"] == "blocked"
+    assert plan["blocked_reason"] == "no_candidates"
+    assert plan["total_candidates"] == 0
+    with pytest.raises(ServiceConflictError, match="no_candidates"):
+        service.approve_reply_plan(ctx, plan["id"])
+    with pytest.raises(ServiceConflictError, match="plan_not_executable"):
+        service.execute_reply_plan(ctx, plan["id"])
+    assert service.list_reply_records(ctx)["total"] == 0
+
+
+def test_candidate_mutations_recompute_plan_counts_and_approval_state(service: SaaSService, ctx: TenantContext, campaign: dict):
+    template = service.create_reply_template(ctx, {"name": "Contact", "content": "Contact {{contact}}", "is_default": True})
+    service.create_reply_match_rule(ctx, {"campaign_id": campaign["id"], "reply_template_id": template["id"], "name": "Contact", "contains_any_json": ["contact"]})
+    execution = _execution(service, ctx, campaign)
+    _scan_artifact(service, ctx, execution["id"], [{"comment_id": "c1", "text": "contact me", "fingerprint": "fp1"}])
+    plan = service.generate_reply_plan_for_execution(ctx, execution["id"])
+    candidate = service.list_reply_candidates(ctx)["items"][0]
+
+    service.approve_reply_candidate(ctx, candidate["id"])
+    synced = service.storage.get_by_id("reply_plans", plan["id"], tenant_id=ctx.tenant_id)
+    assert synced and synced["total_candidates"] == 1 and synced["approved_count"] == 1
+    approved_plan = service.approve_reply_plan(ctx, plan["id"])
+    assert approved_plan["status"] == "approved"
+
+    service.update_reply_candidate_content(ctx, candidate["id"], "Edited contact response")
+    synced = service.storage.get_by_id("reply_plans", plan["id"], tenant_id=ctx.tenant_id)
+    assert synced and synced["approved_count"] == 0 and synced["status"] == "pending_approval"
+    with pytest.raises(ServiceConflictError, match="no_approved_candidates"):
+        service.approve_reply_plan(ctx, plan["id"])
+
+
+def test_disabled_send_persists_one_associated_idempotent_record_per_approved_candidate(service: SaaSService, ctx: TenantContext, campaign: dict):
+    template = service.create_reply_template(ctx, {"name": "Contact", "content": "Contact {{contact}}", "is_default": True})
+    service.create_reply_match_rule(ctx, {"campaign_id": campaign["id"], "reply_template_id": template["id"], "name": "Contact", "contains_any_json": ["contact"]})
+    execution = _execution(service, ctx, campaign)
+    _scan_artifact(service, ctx, execution["id"], [
+        {"comment_id": "c1", "text": "contact me", "fingerprint": "fp1"},
+        {"comment_id": "c2", "text": "contact please", "fingerprint": "fp2"},
+    ])
+    plan = service.generate_reply_plan_for_execution(ctx, execution["id"])
+    candidates = service.list_reply_candidates(ctx)["items"]
+    service.bulk_approve_reply_candidates(ctx, [candidate["id"] for candidate in candidates])
+    service.approve_reply_plan(ctx, plan["id"])
+
+    executed = service.execute_reply_plan(ctx, plan["id"])
+    records = service.list_reply_records(ctx)["items"]
+
+    assert executed["status"] == "blocked"
+    assert executed["blocked_reason"] == "system_send_disabled"
+    assert len(records) == 2
+    assert {record["reply_candidate_id"] for record in records} == {candidate["id"] for candidate in candidates}
+    assert {record["comment_id"] for record in records} == {"c1", "c2"}
+    assert all(record["reply_plan_id"] == plan["id"] and record["reply_text"] and record["status"] == "blocked" for record in records)
+    assert len({record["idempotency_key"] for record in records}) == 2
 
 
 def _execution(service: SaaSService, ctx: TenantContext, campaign: dict) -> dict:

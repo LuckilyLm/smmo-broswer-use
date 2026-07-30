@@ -1,14 +1,23 @@
 import { useMemo, useState } from 'react'
-import { CheckCircle, ChevronDown, ChevronUp, Eye, Info, X, XCircle } from 'lucide-react'
+import { CheckCircle, ChevronDown, ChevronUp, Eye, Info, Play, X, XCircle } from 'lucide-react'
 
-import { useApproveCandidate, useApprovePlan, useCancelPlan, useRejectCandidate, useReplyCandidates, useReplyPlans, type ReplyCandidate, type ReplyPlan } from '../api/reply-tasks'
+import { canApproveReplyPlan, useApproveCandidate, useApprovePlan, useCancelPlan, useExecutePlan, useRejectCandidate, useReplyCandidates, useReplyPlans, type ReplyCandidate, type ReplyCandidateStatus, type ReplyPlan, type ReplyPlanStatus } from '../api/reply-tasks'
 import StatusBadge from '../components/ui/StatusBadge'
+import { isDemoData } from '../utils/provenance'
 
-const TABS = [
+const PLAN_TABS: Array<{ label: string; value: ReplyPlanStatus }> = [
   { label: '待审批', value: 'pending_approval' },
   { label: '已批准', value: 'approved' },
-  { label: '执行中', value: 'executing' },
-  { label: '已完成', value: 'completed' },
+  { label: '已阻断', value: 'blocked' },
+  { label: '已执行', value: 'executed' },
+  { label: '已取消', value: 'cancelled' },
+]
+const CANDIDATE_TABS: Array<{ label: string; value: ReplyCandidateStatus }> = [
+  { label: '待审批', value: 'pending_approval' },
+  { label: '已批准', value: 'approved' },
+  { label: '已阻断', value: 'blocked' },
+  { label: '已拒绝', value: 'rejected' },
+  { label: '已发送', value: 'sent' },
   { label: '已失败', value: 'failed' },
   { label: '已取消', value: 'cancelled' },
 ]
@@ -20,8 +29,7 @@ function statusLabel(value?: string) {
     approved: '已批准',
     rejected: '已拒绝',
     cancelled: '已取消',
-    executing: '执行中',
-    completed: '已完成',
+    executed: '已执行',
     failed: '失败',
     sent: '已发送',
     blocked: '已阻断',
@@ -43,6 +51,7 @@ function PlanDrawer({ plan, candidates, onClose }: { plan: ReplyPlan; candidates
   const rejectCandidate = useRejectCandidate()
   const approvePlan = useApprovePlan()
   const cancelPlan = useCancelPlan()
+  const executePlan = useExecutePlan()
   const [expandedId, setExpandedId] = useState<string | null>(candidates[0]?.id || null)
 
   return (
@@ -64,6 +73,7 @@ function PlanDrawer({ plan, candidates, onClose }: { plan: ReplyPlan; candidates
             <InfoCell label="回复模式" value={statusLabel(plan.reply_mode)} />
             <InfoCell label="计划状态" value={statusLabel(plan.status)} />
             <InfoCell label="候选数量" value={String(plan.total_candidates)} />
+            {plan.blocked_reason && <InfoCell label="阻断原因" value={plan.blocked_reason} />}
             <InfoCell label="创建时间" value={formatDate(plan.created_at)} />
           </div>
         </div>
@@ -78,7 +88,7 @@ function PlanDrawer({ plan, candidates, onClose }: { plan: ReplyPlan; candidates
                   <div className="cursor-pointer bg-white p-3.5" onClick={() => setExpandedId(expanded ? null : c.id)}>
                     <div className="mb-1.5 flex items-center justify-between">
                       <span className="text-xs font-medium text-gray-800">{c.author_name || '未知作者'}</span>
-                      <div className="flex items-center gap-2"><StatusBadge status={statusLabel(c.status)} />{expanded ? <ChevronUp size={12} /> : <ChevronDown size={12} />}</div>
+                      <div className="flex items-center gap-2"><StatusBadge status={c.status} label={statusLabel(c.status)} />{expanded ? <ChevronUp size={12} /> : <ChevronDown size={12} />}</div>
                     </div>
                     <div className="line-clamp-2 text-xs text-gray-500">{c.comment_text || '—'}</div>
                     <div className="mt-2 flex flex-wrap gap-1.5 text-[11px] text-gray-400"><span className="rounded bg-gray-100 px-1.5 py-0.5">规则：{c.matched_rule_name || c.matched_rule_id || '—'}</span><span className="rounded bg-gray-100 px-1.5 py-0.5">模板：{c.reply_template_id || '—'}</span></div>
@@ -87,7 +97,8 @@ function PlanDrawer({ plan, candidates, onClose }: { plan: ReplyPlan; candidates
                     <div className="border-t p-3.5" style={{ borderColor: 'var(--border)', background: '#fafafa' }}>
                       <div className="mb-1.5 text-[11px] text-gray-500">渲染后回复内容</div>
                       <div className="text-xs leading-relaxed text-gray-700">{c.rendered_reply_text || '—'}</div>
-                      {c.status === 'pending_approval' && <div className="mt-3 flex gap-2"><button className="flex flex-1 items-center justify-center gap-1 rounded-lg border px-3 py-2 text-xs text-red-500 hover:bg-red-50" style={{ borderColor: '#fca5a5', minHeight: 44 }} onClick={() => rejectCandidate.mutate({ id: c.id, reason: '人工拒绝' })}><XCircle size={12} />拒绝</button><button className="flex flex-1 items-center justify-center gap-1 rounded-lg px-3 py-2 text-xs text-white" style={{ background: 'var(--primary)', minHeight: 44 }} onClick={() => approveCandidate.mutate(c.id)}><CheckCircle size={12} />批准</button></div>}
+                      {c.blocked_reason && <div className="mt-2 rounded-lg border border-amber-200 bg-amber-50 p-2 text-xs text-amber-700">阻断原因：{c.blocked_reason}</div>}
+                      {(c.status === 'pending_approval' || c.status === 'blocked') && <div className="mt-3 flex gap-2"><button className="flex flex-1 items-center justify-center gap-1 rounded-lg border px-3 py-2 text-xs text-red-500 hover:bg-red-50" style={{ borderColor: '#fca5a5', minHeight: 44 }} onClick={() => rejectCandidate.mutate({ id: c.id, reason: '人工拒绝' })}><XCircle size={12} />拒绝</button><button className="flex flex-1 items-center justify-center gap-1 rounded-lg px-3 py-2 text-xs text-white" style={{ background: 'var(--primary)', minHeight: 44 }} onClick={() => approveCandidate.mutate(c.id)}><CheckCircle size={12} />批准</button></div>}
                     </div>
                   )}
                 </div>
@@ -97,8 +108,12 @@ function PlanDrawer({ plan, candidates, onClose }: { plan: ReplyPlan; candidates
         </div>
       </div>
       <div className="flex shrink-0 gap-2 border-t p-4" style={{ borderColor: 'var(--border)' }}>
-        <button className="flex flex-1 items-center justify-center gap-1.5 rounded-lg border px-3 py-2.5 text-sm font-medium text-red-500 hover:bg-red-50" style={{ borderColor: '#fca5a5', minHeight: 44 }} onClick={() => cancelPlan.mutate(plan.id)}><XCircle size={13} />取消计划</button>
-        <button className="flex flex-1 items-center justify-center gap-1.5 rounded-lg px-3 py-2.5 text-sm font-medium text-white disabled:opacity-50" style={{ background: 'var(--primary)', minHeight: 44 }} disabled={plan.status !== 'pending_approval'} onClick={() => approvePlan.mutate(plan.id)}><CheckCircle size={13} />批准计划</button>
+        <button className="flex flex-1 items-center justify-center gap-1.5 rounded-lg border px-3 py-2.5 text-sm font-medium text-red-500 hover:bg-red-50 disabled:opacity-50" style={{ borderColor: '#fca5a5', minHeight: 44 }} disabled={!['pending_approval', 'approved', 'blocked'].includes(plan.status) || cancelPlan.isPending} onClick={() => cancelPlan.mutate(plan.id)}><XCircle size={13} />取消计划</button>
+        {plan.status === 'approved' ? (
+          <button className="flex flex-1 items-center justify-center gap-1.5 rounded-lg px-3 py-2.5 text-sm font-medium text-white disabled:opacity-50" style={{ background: 'var(--primary)', minHeight: 44 }} disabled={executePlan.isPending} onClick={() => executePlan.mutate(plan.id)}><Play size={13} />执行计划</button>
+        ) : (
+          <button className="flex flex-1 items-center justify-center gap-1.5 rounded-lg px-3 py-2.5 text-sm font-medium text-white disabled:opacity-50" style={{ background: 'var(--primary)', minHeight: 44 }} disabled={!canApproveReplyPlan(plan) || approvePlan.isPending} title={plan.total_candidates === 0 ? '没有候选回复的计划不能批准' : undefined} onClick={() => approvePlan.mutate(plan.id)}><CheckCircle size={13} />批准计划</button>
+        )}
       </div>
     </div>
   )
@@ -106,10 +121,13 @@ function PlanDrawer({ plan, candidates, onClose }: { plan: ReplyPlan; candidates
 
 export default function ReplyTasks() {
   const [mainTab, setMainTab] = useState('回复计划')
-  const [activeTab, setActiveTab] = useState('pending_approval')
+  const [planTab, setPlanTab] = useState<ReplyPlanStatus>('pending_approval')
+  const [candidateTab, setCandidateTab] = useState<ReplyCandidateStatus>('pending_approval')
+  const activeTab = mainTab === '回复计划' ? planTab : candidateTab
+  const tabs = mainTab === '回复计划' ? PLAN_TABS : CANDIDATE_TABS
   const [openPlanId, setOpenPlanId] = useState<string | null>(null)
-  const { data: plansPage, isLoading: plansLoading, error: plansError } = useReplyPlans(activeTab)
-  const { data: candidatesPage, isLoading: candidatesLoading, error: candidatesError } = useReplyCandidates(mainTab === '回复候选' ? activeTab : undefined)
+  const { data: plansPage, isLoading: plansLoading, error: plansError } = useReplyPlans(mainTab === '回复计划' ? planTab : undefined)
+  const { data: candidatesPage, isLoading: candidatesLoading, error: candidatesError } = useReplyCandidates(mainTab === '回复候选' ? candidateTab : undefined)
   const { data: allCandidatesPage } = useReplyCandidates()
   const plans = plansPage?.items || []
   const candidates = candidatesPage?.items || []
@@ -135,21 +153,26 @@ export default function ReplyTasks() {
     <div className="flex min-h-full flex-col">
       <div className="flex flex-1 flex-col gap-4 p-4 md:p-6">
         <div><h1 className="text-lg font-semibold text-gray-900 md:text-xl">回复任务</h1><p className="mt-0.5 hidden text-sm text-gray-500 md:block">查看并审批真实执行产生的回复计划和候选回复</p></div>
+        <div className="flex items-start gap-2 rounded-xl border border-sky-200 bg-sky-50 p-3 text-sm text-sky-800"><Info size={14} className="mt-0.5 shrink-0" /><span>标注“演示样本”的计划和候选来自 Demo seed，不代表刚执行的真实任务或真实发送。</span></div>
         <div className="grid grid-cols-3 gap-2 md:grid-cols-5 md:gap-3">{metrics.map((m) => <div key={m.label} className="rounded-xl border bg-white px-3 py-3" style={{ borderColor: 'var(--border)' }}><div className="text-[11px] text-gray-400">{m.label}</div><div className="mt-1 text-2xl font-bold" style={{ color: m.color }}>{m.value}</div></div>)}</div>
         <div className="flex border-b" style={{ borderColor: 'var(--border)' }}>{MAIN_TABS.map((tab) => <button key={tab} className="border-b-2 px-4 py-2.5 text-sm font-medium" style={{ borderBottomColor: mainTab === tab ? 'var(--primary)' : 'transparent', color: mainTab === tab ? 'var(--primary)' : '#6b7280', minHeight: 44 }} onClick={() => setMainTab(tab)}>{tab}</button>)}</div>
-        <div className="-mt-2 flex overflow-x-auto border-b" style={{ borderColor: 'var(--border)' }}>{TABS.map((tab) => <button key={tab.value} className="shrink-0 border-b-2 px-3 py-2 text-xs font-medium" style={{ borderBottomColor: activeTab === tab.value ? 'var(--primary)' : 'transparent', color: activeTab === tab.value ? 'var(--primary)' : '#6b7280', minHeight: 40 }} onClick={() => setActiveTab(tab.value)}>{tab.label}</button>)}</div>
+        <div className="-mt-2 flex overflow-x-auto border-b" style={{ borderColor: 'var(--border)' }}>{tabs.map((tab) => <button key={tab.value} className="shrink-0 border-b-2 px-3 py-2 text-xs font-medium" style={{ borderBottomColor: activeTab === tab.value ? 'var(--primary)' : 'transparent', color: activeTab === tab.value ? 'var(--primary)' : '#6b7280', minHeight: 40 }} onClick={() => mainTab === '回复计划' ? setPlanTab(tab.value as ReplyPlanStatus) : setCandidateTab(tab.value as ReplyCandidateStatus)}>{tab.label}</button>)}</div>
         {(plansError || candidatesError) && <div className="rounded-lg border border-red-200 bg-red-50 p-3 text-sm text-red-700">回复任务加载失败，请刷新重试</div>}
         {mainTab === '回复计划' ? (
           <div className="overflow-hidden rounded-xl border bg-white" style={{ borderColor: 'var(--border)' }}>
-            {plansLoading ? <div className="p-4 text-sm text-gray-500">正在加载回复计划...</div> : plans.length === 0 ? <div className="py-16 text-center text-sm text-gray-400">暂无{statusLabel(activeTab)}计划</div> : <div className="overflow-x-auto"><table className="w-full min-w-[820px] text-sm"><thead><tr className="border-b bg-gray-50" style={{ borderColor: 'var(--border)' }}>{['计划 ID', '活动', '执行', '回复模式', '候选', '已批准', '已发送', '失败', '状态', '创建时间', '操作'].map((h) => <th key={h} className="px-4 py-3 text-left text-xs font-semibold text-gray-500">{h}</th>)}</tr></thead><tbody>{plans.map((p) => <tr key={p.id} className="border-b last:border-0 hover:bg-gray-50" style={{ borderColor: 'var(--border)' }}><td className="px-4 py-3 font-mono text-xs">{p.id}</td><td className="px-4 py-3 font-mono text-xs text-gray-500">{p.campaign_id}</td><td className="px-4 py-3 font-mono text-xs text-gray-500">{p.execution_id || '—'}</td><td className="px-4 py-3"><StatusBadge status={statusLabel(p.reply_mode)} /></td><td className="px-4 py-3 text-center">{p.total_candidates}</td><td className="px-4 py-3 text-center text-green-600">{p.approved_count}</td><td className="px-4 py-3 text-center">{p.sent_count}</td><td className="px-4 py-3 text-center text-red-500">{p.failed_count || '—'}</td><td className="px-4 py-3"><StatusBadge status={statusLabel(p.status)} variant="dot" /></td><td className="px-4 py-3 text-xs text-gray-400">{formatDate(p.created_at)}</td><td className="px-4 py-3"><button className="flex items-center gap-1 rounded-lg border px-2.5 py-1.5 text-xs text-indigo-600 hover:bg-gray-50" style={{ borderColor: 'var(--border)' }} onClick={() => setOpenPlanId(p.id)}><Eye size={11} />查看</button></td></tr>)}</tbody></table></div>}
+            {plansLoading ? <div className="p-4 text-sm text-gray-500">正在加载回复计划...</div> : plans.length === 0 ? <div className="py-16 text-center text-sm text-gray-400">暂无{statusLabel(activeTab)}计划</div> : <div className="overflow-x-auto"><table className="w-full min-w-[820px] text-sm"><thead><tr className="border-b bg-gray-50" style={{ borderColor: 'var(--border)' }}>{['计划 ID', '活动', '执行', '回复模式', '候选', '已批准', '已发送', '失败', '状态', '创建时间', '操作'].map((h) => <th key={h} className="px-4 py-3 text-left text-xs font-semibold text-gray-500">{h}</th>)}</tr></thead><tbody>{plans.map((p) => <tr key={p.id} className="border-b last:border-0 hover:bg-gray-50" style={{ borderColor: 'var(--border)' }}><td className="px-4 py-3 font-mono text-xs">{p.id}</td><td className="px-4 py-3 font-mono text-xs text-gray-500">{p.campaign_id}</td><td className="px-4 py-3 font-mono text-xs text-gray-500">{p.execution_id || '—'}</td><td className="px-4 py-3"><StatusBadge status={p.reply_mode || 'unknown'} label={statusLabel(p.reply_mode)} /></td><td className="px-4 py-3 text-center">{p.total_candidates}</td><td className="px-4 py-3 text-center text-green-600">{p.approved_count}</td><td className="px-4 py-3 text-center">{p.sent_count}</td><td className="px-4 py-3 text-center text-red-500">{p.failed_count || '—'}</td><td className="px-4 py-3"><StatusBadge status={p.status} label={statusLabel(p.status)} variant="dot" /></td><td className="px-4 py-3 text-xs text-gray-400">{formatDate(p.created_at)}</td><td className="px-4 py-3"><button className="flex items-center gap-1 rounded-lg border px-2.5 py-1.5 text-xs text-indigo-600 hover:bg-gray-50" style={{ borderColor: 'var(--border)' }} onClick={() => setOpenPlanId(p.id)}><Eye size={11} />查看</button></td></tr>)}</tbody></table></div>}
           </div>
         ) : (
-          <div className="flex flex-col gap-2">{candidatesLoading ? <div className="rounded-xl border bg-white p-4 text-sm text-gray-500" style={{ borderColor: 'var(--border)' }}>正在加载候选回复...</div> : candidates.length === 0 ? <div className="rounded-xl border bg-white py-16 text-center text-sm text-gray-400" style={{ borderColor: 'var(--border)' }}>暂无{statusLabel(activeTab)}候选</div> : candidates.map((c) => <div key={c.id} className="rounded-xl border bg-white p-4" style={{ borderColor: 'var(--border)' }}><div className="mb-2 flex items-start justify-between gap-2"><div className="font-medium text-gray-900">{c.author_name || '未知作者'}</div><StatusBadge status={statusLabel(c.status)} /></div><div className="mb-2 text-xs text-gray-500">{c.comment_text || '—'}</div><div className="mb-3 flex flex-wrap gap-1.5"><span className="rounded bg-gray-100 px-1.5 py-0.5 text-[11px] text-gray-500">规则：{c.matched_rule_name || c.matched_rule_id || '—'}</span><span className="rounded bg-gray-100 px-1.5 py-0.5 text-[11px] text-gray-500">计划：{c.reply_plan_id || '—'}</span></div><div className="border-t pt-2.5" style={{ borderColor: 'var(--border)' }}><div className="mb-1 text-[11px] text-gray-400">回复预览</div><div className="text-xs leading-relaxed text-gray-700">{c.rendered_reply_text || '—'}</div></div></div>)}</div>
+          <div className="flex flex-col gap-2">{candidatesLoading ? <div className="rounded-xl border bg-white p-4 text-sm text-gray-500" style={{ borderColor: 'var(--border)' }}>正在加载候选回复...</div> : candidates.length === 0 ? <div className="rounded-xl border bg-white py-16 text-center text-sm text-gray-400" style={{ borderColor: 'var(--border)' }}>暂无{statusLabel(activeTab)}候选</div> : candidates.map((c) => <div key={c.id} className="rounded-xl border bg-white p-4" style={{ borderColor: 'var(--border)' }}><div className="mb-2 flex items-start justify-between gap-2"><div className="font-medium text-gray-900">{c.author_name || '未知作者'}</div><StatusBadge status={c.status} label={statusLabel(c.status)} /></div><div className="mb-2 text-xs text-gray-500">{c.comment_text || '—'}</div><div className="mb-3 flex flex-wrap gap-1.5"><span className="rounded bg-gray-100 px-1.5 py-0.5 text-[11px] text-gray-500">规则：{c.matched_rule_name || c.matched_rule_id || '—'}</span><span className="rounded bg-gray-100 px-1.5 py-0.5 text-[11px] text-gray-500">计划：{c.reply_plan_id || '—'}</span></div><div className="border-t pt-2.5" style={{ borderColor: 'var(--border)' }}><div className="mb-1 text-[11px] text-gray-400">回复预览</div><div className="text-xs leading-relaxed text-gray-700">{c.rendered_reply_text || '—'}</div>{c.blocked_reason && <div className="mt-2 rounded-lg border border-amber-200 bg-amber-50 p-2 text-xs text-amber-700">阻断原因：{c.blocked_reason}</div>}</div></div>)}</div>
         )}
       </div>
       {openPlan && <><div className="fixed inset-0 z-40 bg-black/20" onClick={() => setOpenPlanId(null)} /><PlanDrawer plan={openPlan} candidates={candidatesByPlan.get(openPlan.id) || []} onClose={() => setOpenPlanId(null)} /></>}
     </div>
   )
+}
+
+function DemoBadge() {
+  return <span className="shrink-0 rounded border border-sky-200 bg-sky-50 px-1.5 py-0.5 font-sans text-[10px] font-medium text-sky-700">演示样本</span>
 }
 
 function InfoCell({ label, value, mono = false }: { label: string; value: string; mono?: boolean }) {

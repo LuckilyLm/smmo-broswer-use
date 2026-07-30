@@ -47,8 +47,12 @@ function handleSessionExpired() {
 }
 
 async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
-  const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), 30000);
+  const timeoutController = new AbortController();
+  const externalSignal = init.signal;
+  const abortFromExternal = () => timeoutController.abort(externalSignal?.reason);
+  if (externalSignal?.aborted) abortFromExternal();
+  else externalSignal?.addEventListener("abort", abortFromExternal, { once: true });
+  const timeoutId = setTimeout(() => timeoutController.abort(), 30000);
 
   const headers: Record<string, string> = {
     "Content-Type": "application/json",
@@ -63,7 +67,7 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
       ...init,
       credentials: "include",
       headers,
-      signal: controller.signal,
+      signal: timeoutController.signal,
     });
     clearTimeout(timeoutId);
 
@@ -92,12 +96,21 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
 
     return (await response.json()) as T;
   } catch (err) {
-    clearTimeout(timeoutId);
     if (err instanceof ApiError) throw err;
     if (err instanceof Error && err.name === "AbortError") {
-      throw new ApiError("request_timeout", "请求超时，请重试", 0, undefined, requestId);
+      const externallyAborted = externalSignal?.aborted;
+      throw new ApiError(
+        externallyAborted ? "request_aborted" : "request_timeout",
+        externallyAborted ? "请求已取消" : "请求超时，请重试",
+        0,
+        undefined,
+        requestId,
+      );
     }
     throw new ApiError("network_error", "网络错误，请检查连接", 0, undefined, requestId);
+  } finally {
+    clearTimeout(timeoutId);
+    externalSignal?.removeEventListener("abort", abortFromExternal);
   }
 }
 

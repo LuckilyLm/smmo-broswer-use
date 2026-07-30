@@ -207,6 +207,7 @@ docs/superpowers/
 # Frontend generated artifacts
 web/saas-dashboard/node_modules/
 web/saas-dashboard/dist/
+web/saas-dashboard/output/
 web/saas-dashboard/tsconfig.tsbuildinfo
 web/saas-dashboard/AGENTS.md
 web/saas-dashboard/CLAUDE.md

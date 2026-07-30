@@ -12,7 +12,7 @@ import time
 from pathlib import Path
 from typing import Any, Awaitable, Callable
 from urllib.error import URLError
-from urllib.request import urlopen
+from urllib.request import Request, urlopen
 from browser_use.browser.browser import Browser, BrowserConfig
 from sqlalchemy.exc import IntegrityError
 
@@ -44,6 +44,9 @@ class BrowserRuntimeRegistry:
         cdp_port_start: int = 9300,
         cdp_port_end: int = 9399,
         runtime_host: str = "local",
+        cdp_base_url: str = "http://127.0.0.1",
+        cdp_bind_address: str = "127.0.0.1",
+        remote_control_url: str | None = None,
         browser_headless: bool = False,
         allow_chrome_discovery: bool = True,
     ) -> None:
@@ -54,9 +57,13 @@ class BrowserRuntimeRegistry:
         self.cdp_port_start = cdp_port_start
         self.cdp_port_end = cdp_port_end
         self.runtime_host = runtime_host
+        self.cdp_base_url = cdp_base_url.rstrip("/")
+        self.cdp_bind_address = cdp_bind_address
+        self.remote_control_url = remote_control_url.rstrip("/") if remote_control_url else None
         self.browser_headless = browser_headless
         self._sessions: dict[str, Browser] = {}
         self._browser_pids: dict[str, int] = {}
+        self._cdp_proxies: dict[str, _CdpPortForwarder] = {}
         self._browser_loop = _BrowserUseRuntimeLoop()
 
     def get_runtime(self, context: TenantContext, account_id: str) -> dict[str, Any] | None:
@@ -66,7 +73,6 @@ class BrowserRuntimeRegistry:
         return self.storage.get_by_id("browser_runtimes", runtime_id, tenant_id=context.tenant_id)
 
     def create_runtime(self, context: TenantContext, account_id: str) -> dict[str, Any]:
-        self._require_local_runtime()
         profile_path = self.profile_path(context.tenant_id, account_id)
         existing = self.get_runtime(context, account_id)
         if existing:
@@ -81,13 +87,14 @@ class BrowserRuntimeRegistry:
                     "runtime_type": existing.get("runtime_type"),
                     "profile_path": existing.get("profile_path"),
                 },
-            )
+                )
             self.storage.delete_by_id("browser_runtimes", existing["id"], tenant_id=context.tenant_id)
             self.storage.update_by_id("platform_accounts", account_id, {"browser_runtime_id": None}, tenant_id=context.tenant_id)
         account = self.storage.get_by_id("platform_accounts", account_id, tenant_id=context.tenant_id)
         if not account:
             raise BrowserRuntimeError("platform_account_not_found", "platform account not found")
-        profile_path.mkdir(parents=True, exist_ok=True)
+        if self.runtime_host == "local":
+            profile_path.mkdir(parents=True, exist_ok=True)
         runtime = None
         for _attempt in range(5):
             cdp_port = self.allocate_port()
@@ -101,7 +108,7 @@ class BrowserRuntimeRegistry:
                         "status": "stopped",
                         "profile_path": str(profile_path),
                         "cdp_port": cdp_port,
-                        "cdp_url": f"http://127.0.0.1:{cdp_port}",
+                        "cdp_url": self._cdp_url(cdp_port),
                     },
                 )
                 break
@@ -115,8 +122,10 @@ class BrowserRuntimeRegistry:
         return runtime
 
     def start_runtime(self, context: TenantContext, account_id: str, *, url: str = "https://www.facebook.com/") -> dict[str, Any]:
-        self._require_local_runtime()
         runtime = self.create_runtime(context, account_id)
+        if self.runtime_host == "remote":
+            self._remote_control("POST", f"/internal/runtime/{context.tenant_id}/{account_id}/start", {"url": url})
+            return self.get_runtime_by_id(context, runtime["id"]) or runtime
         self.reconcile_runtime(context, runtime["id"])
         runtime = self.get_runtime_by_id(context, runtime["id"]) or runtime
         if runtime["status"] == "running" and self.health_check(context, runtime["id"])["reachable"]:
@@ -144,10 +153,12 @@ class BrowserRuntimeRegistry:
         return updated or runtime
 
     def stop_runtime(self, context: TenantContext, account_id: str) -> dict[str, Any]:
-        self._require_local_runtime()
         runtime = self.get_runtime(context, account_id)
         if not runtime:
             raise BrowserRuntimeError("runtime_not_found", "runtime not found")
+        if self.runtime_host == "remote":
+            self._remote_control("POST", f"/internal/runtime/{context.tenant_id}/{account_id}/stop", {})
+            return self.get_runtime_by_id(context, runtime["id"]) or runtime
         self._close_session(runtime["id"])
         return self.storage.update_by_id(
             "browser_runtimes",
@@ -157,13 +168,19 @@ class BrowserRuntimeRegistry:
         ) or runtime
 
     def restart_runtime(self, context: TenantContext, account_id: str) -> dict[str, Any]:
+        if self.runtime_host == "remote":
+            runtime = self.create_runtime(context, account_id)
+            self._remote_control("POST", f"/internal/runtime/{context.tenant_id}/{account_id}/restart", {})
+            return self.get_runtime_by_id(context, runtime["id"]) or runtime
         self.stop_runtime(context, account_id)
         return self.start_runtime(context, account_id)
 
     def reset_profile(self, context: TenantContext, account_id: str, *, confirm: str) -> dict[str, Any]:
-        self._require_local_runtime()
         if confirm != "RESET PROFILE":
             raise BrowserRuntimeError("confirmation_required", "reset profile requires exact confirmation")
+        if self.runtime_host == "remote":
+            self._remote_control("POST", f"/internal/runtime/{context.tenant_id}/{account_id}/reset-profile", {"confirm": confirm})
+            return self.get_runtime(context, account_id) or self.create_runtime(context, account_id)
         runtime = self.get_runtime(context, account_id)
         if runtime:
             self.stop_runtime(context, account_id)
@@ -185,7 +202,7 @@ class BrowserRuntimeRegistry:
             raise BrowserRuntimeError("runtime_not_found", "runtime not found")
         reachable = _cdp_reachable(runtime["cdp_url"])
         status = "running" if reachable else "unhealthy"
-        if not reachable and runtime.get("browser_pid") and not _pid_exists(int(runtime["browser_pid"])):
+        if self.runtime_host == "local" and not reachable and runtime.get("browser_pid") and not _pid_exists(int(runtime["browser_pid"])):
             status = "stopped"
         updated = self.storage.update_by_id(
             "browser_runtimes",
@@ -196,7 +213,16 @@ class BrowserRuntimeRegistry:
         return {"reachable": reachable, "status": status, "runtime": safe_runtime(updated or runtime)}
 
     async def check_login(self, context: TenantContext, account_id: str) -> dict[str, Any]:
-        self._require_local_runtime()
+        if self.runtime_host == "remote":
+            self._remote_control("POST", f"/internal/runtime/{context.tenant_id}/{account_id}/check-login", {})
+            account = self.storage.get_by_id("platform_accounts", account_id, tenant_id=context.tenant_id) or {}
+            runtime = self.get_runtime(context, account_id) or {}
+            return {
+                "login_status": account.get("login_status") or "unknown",
+                "connection_status": account.get("connection_status") or "not_connected",
+                "account": safe_account(account),
+                "runtime": safe_runtime(runtime),
+            }
         runtime = self.get_runtime(context, account_id)
         if not runtime:
             raise BrowserRuntimeError("runtime_not_found", "runtime not found")
@@ -262,7 +288,7 @@ class BrowserRuntimeRegistry:
         for port in range(self.cdp_port_start, self.cdp_port_end + 1):
             if port in used:
                 continue
-            if _port_free(port):
+            if self.runtime_host != "local" or _port_free(port):
                 return port
         raise BrowserRuntimeError("no_available_cdp_port", "no available CDP port")
 
@@ -285,9 +311,11 @@ class BrowserRuntimeRegistry:
         return self.storage.update_by_id("browser_runtimes", runtime["id"], {"status": "error", "last_error": message}, tenant_id=context.tenant_id) or runtime
 
     def _runtime_matches_current_backend(self, tenant_id: str, account_id: str, runtime: dict[str, Any]) -> bool:
+        cdp_port = runtime.get("cdp_port")
         return (
             runtime.get("runtime_type") == "browser_use_chromium_cdp"
             and Path(str(runtime.get("profile_path") or "")).resolve() == self.profile_path(tenant_id, account_id)
+            and (cdp_port is None or str(runtime.get("cdp_url") or "") == self._cdp_url(int(cdp_port)))
         )
 
     async def _start_browser_use(self, runtime: dict[str, Any], *, url: str) -> None:
@@ -306,6 +334,7 @@ class BrowserRuntimeRegistry:
             "--window-size=1366,900",
             "--window-position=0,0",
             "--ozone-platform=x11",
+            "--remote-allow-origins=*",
         ]
         if self.chrome_executable:
             stderr_path = Path("/tmp") / f"saas-chromium-{runtime['id']}.err"
@@ -313,7 +342,7 @@ class BrowserRuntimeRegistry:
             launch_args = [
                 self.chrome_executable,
                 f"--remote-debugging-port={int(runtime['cdp_port'])}",
-                "--remote-debugging-address=127.0.0.1",
+                f"--remote-debugging-address={self.cdp_bind_address}",
                 f"--user-data-dir={profile_path}",
                 "--no-sandbox",
                 "--disable-dev-shm-usage",
@@ -344,12 +373,19 @@ class BrowserRuntimeRegistry:
                     env=env,
                 )
             self._browser_pids[runtime["id"]] = process.pid
-            if not await asyncio.to_thread(_wait_for_cdp, runtime["cdp_url"], timeout_seconds=10):
+            local_cdp_url = self._local_cdp_url(int(runtime["cdp_port"]))
+            if not await asyncio.to_thread(_wait_for_cdp, local_cdp_url, timeout_seconds=10):
                 _terminate_process_tree(process.pid)
                 self._browser_pids.pop(runtime["id"], None)
                 stderr_tail = _tail_file(stderr_path, max_bytes=4000)
                 raise BrowserRuntimeError("cdp_start_timeout", f"Chromium started but CDP did not become reachable; stderr={stderr_tail}")
-            config = BrowserConfig(cdp_url=runtime["cdp_url"], headless=self.browser_headless)
+            self._ensure_cdp_proxy(runtime)
+            if not await asyncio.to_thread(_wait_for_cdp, runtime["cdp_url"], timeout_seconds=5):
+                self._close_cdp_proxy(runtime["id"])
+                _terminate_process_tree(process.pid)
+                self._browser_pids.pop(runtime["id"], None)
+                raise BrowserRuntimeError("cdp_proxy_unreachable", f"CDP proxy did not become reachable at {runtime['cdp_url']}")
+            config = BrowserConfig(cdp_url=local_cdp_url, headless=self.browser_headless)
         else:
             config = BrowserConfig(
                 chrome_remote_debugging_port=int(runtime["cdp_port"]),
@@ -365,6 +401,7 @@ class BrowserRuntimeRegistry:
         self._sessions[runtime["id"]] = browser
 
     def _close_session(self, runtime_id: str) -> None:
+        self._close_cdp_proxy(runtime_id)
         browser = self._sessions.pop(runtime_id, None)
         if browser is not None:
             self._run_async(browser.close())
@@ -388,6 +425,47 @@ class BrowserRuntimeRegistry:
 
     def _login_state_snapshot_path(self, runtime: dict[str, Any]) -> Path:
         return Path(runtime["profile_path"]) / "saas_login_state.json"
+
+    def _cdp_url(self, port: int) -> str:
+        return f"{self.cdp_base_url}:{int(port)}"
+
+    def _local_cdp_url(self, port: int) -> str:
+        return f"http://127.0.0.1:{int(port)}"
+
+    def _ensure_cdp_proxy(self, runtime: dict[str, Any]) -> None:
+        if self._local_cdp_url(int(runtime["cdp_port"])) == runtime["cdp_url"]:
+            return
+        runtime_id = runtime["id"]
+        self._close_cdp_proxy(runtime_id)
+        try:
+            bind_host = socket.gethostbyname(socket.gethostname())
+        except OSError as exc:
+            raise BrowserRuntimeError("cdp_proxy_bind_unavailable", f"could not resolve container bind address: {exc}") from exc
+        proxy = _CdpPortForwarder(bind_host=bind_host, port=int(runtime["cdp_port"]))
+        proxy.start()
+        self._cdp_proxies[runtime_id] = proxy
+
+    def _close_cdp_proxy(self, runtime_id: str) -> None:
+        proxy = self._cdp_proxies.pop(runtime_id, None)
+        if proxy:
+            proxy.close()
+
+    def _remote_control(self, method: str, path: str, payload: dict[str, Any]) -> dict[str, Any]:
+        if not self.remote_control_url:
+            raise BrowserRuntimeError("runtime_control_unavailable", "browser runtime control URL is not configured")
+        data = json.dumps(payload).encode("utf-8")
+        request = Request(
+            f"{self.remote_control_url}{path}",
+            data=data,
+            method=method,
+            headers={"Content-Type": "application/json"},
+        )
+        try:
+            with urlopen(request, timeout=30) as response:
+                body = response.read().decode("utf-8")
+                return json.loads(body) if body else {}
+        except Exception as exc:
+            raise BrowserRuntimeError("runtime_control_failed", f"{type(exc).__name__}: {exc}") from exc
 
     async def _persist_login_state_snapshot(self, runtime: dict[str, Any]) -> dict[str, Any] | None:
         path = self._login_state_snapshot_path(runtime)
@@ -480,6 +558,172 @@ class _BrowserUseRuntimeLoop:
     def _run_forever(self) -> None:
         asyncio.set_event_loop(self._loop)
         self._loop.run_forever()
+
+
+class _CdpPortForwarder:
+    def __init__(self, *, bind_host: str, port: int, target_host: str = "127.0.0.1") -> None:
+        self.bind_host = bind_host
+        self.port = port
+        self.target_host = target_host
+        self._closed = threading.Event()
+        self._server: socket.socket | None = None
+        self._thread: threading.Thread | None = None
+
+    def start(self) -> None:
+        server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        server.bind((self.bind_host, self.port))
+        server.listen(32)
+        server.settimeout(0.5)
+        self._server = server
+        self._thread = threading.Thread(target=self._serve, name=f"cdp-proxy-{self.port}", daemon=True)
+        self._thread.start()
+
+    def close(self) -> None:
+        self._closed.set()
+        if self._server:
+            try:
+                self._server.close()
+            except OSError:
+                pass
+        if self._thread:
+            self._thread.join(timeout=1)
+
+    def _serve(self) -> None:
+        assert self._server is not None
+        while not self._closed.is_set():
+            try:
+                client, _ = self._server.accept()
+            except socket.timeout:
+                continue
+            except OSError:
+                break
+            threading.Thread(target=self._handle_client, args=(client,), daemon=True).start()
+
+    def _handle_client(self, client: socket.socket) -> None:
+        try:
+            upstream = socket.create_connection((self.target_host, self.port), timeout=5)
+        except OSError:
+            client.close()
+            return
+        public_host = {"value": f"{self.bind_host}:{self.port}"}
+        threading.Thread(target=self._pipe_client_to_upstream, args=(client, upstream, self.port, public_host), daemon=True).start()
+        threading.Thread(target=self._pipe_upstream_to_client, args=(upstream, client, self.port, public_host), daemon=True).start()
+
+    @staticmethod
+    def _pipe_client_to_upstream(source: socket.socket, target: socket.socket, port: int, public_host: dict[str, str]) -> None:
+        first_chunk = True
+        buffered = b""
+        try:
+            while True:
+                data = source.recv(65536)
+                if not data:
+                    break
+                if first_chunk:
+                    buffered += data
+                    if b"\r\n\r\n" not in buffered and len(buffered) < 131072:
+                        continue
+                    host = _request_host_header(buffered)
+                    if host:
+                        public_host.setdefault("requested_host", host)
+                    data = _rewrite_cdp_request_headers(buffered, f"127.0.0.1:{port}")
+                    buffered = b""
+                    first_chunk = False
+                target.sendall(data)
+        except OSError:
+            pass
+        finally:
+            for sock in (source, target):
+                try:
+                    sock.shutdown(socket.SHUT_RDWR)
+                except OSError:
+                    pass
+                try:
+                    sock.close()
+                except OSError:
+                    pass
+
+    @staticmethod
+    def _pipe_upstream_to_client(source: socket.socket, target: socket.socket, port: int, public_host: dict[str, str]) -> None:
+        first_chunk = True
+        try:
+            while True:
+                data = source.recv(65536)
+                if not data:
+                    break
+                if first_chunk:
+                    data = _rewrite_cdp_response(data, port, public_host.get("value") or f"127.0.0.1:{port}")
+                    first_chunk = False
+                target.sendall(data)
+        except OSError:
+            pass
+        finally:
+            for sock in (source, target):
+                try:
+                    sock.shutdown(socket.SHUT_RDWR)
+                except OSError:
+                    pass
+                try:
+                    sock.close()
+                except OSError:
+                    pass
+
+
+def _request_host_header(data: bytes) -> str | None:
+    header_end = data.find(b"\r\n\r\n")
+    if header_end == -1:
+        return None
+    for line in data[:header_end].split(b"\r\n"):
+        if line.lower().startswith(b"host:"):
+            try:
+                return line.split(b":", 1)[1].strip().decode("ascii")
+            except UnicodeDecodeError:
+                return None
+    return None
+
+
+def _rewrite_cdp_response(data: bytes, port: int, public_host: str) -> bytes:
+    header_end = data.find(b"\r\n\r\n")
+    if header_end == -1:
+        return data.replace(f"ws://127.0.0.1:{port}".encode("ascii"), f"ws://{public_host}".encode("ascii"))
+    headers = data[:header_end].split(b"\r\n")
+    body = data[header_end + 4 :]
+    old = f"ws://127.0.0.1:{port}".encode("ascii")
+    new = f"ws://{public_host}".encode("ascii")
+    if old not in body:
+        return data
+    body = body.replace(old, new)
+    rewritten: list[bytes] = []
+    for line in headers:
+        if line.lower().startswith(b"content-length:"):
+            rewritten.append(f"Content-Length: {len(body)}".encode("ascii"))
+        else:
+            rewritten.append(line)
+    return b"\r\n".join(rewritten) + b"\r\n\r\n" + body
+
+
+def _rewrite_cdp_request_headers(data: bytes, host: str) -> bytes:
+    header_end = data.find(b"\r\n\r\n")
+    if header_end == -1:
+        return data
+    headers = data[:header_end].split(b"\r\n")
+    rewritten: list[bytes] = []
+    replaced = False
+    for line in headers:
+        if line.lower().startswith(b"host:"):
+            rewritten.append(f"Host: {host}".encode("ascii"))
+            replaced = True
+        elif line.lower().startswith(b"origin:"):
+            rewritten.append(f"Origin: http://{host}".encode("ascii"))
+        else:
+            rewritten.append(line)
+    if not replaced:
+        rewritten.insert(1, f"Host: {host}".encode("ascii"))
+    return b"\r\n".join(rewritten) + data[header_end:]
+
+
+def _rewrite_host_header(data: bytes, host: str) -> bytes:
+    return _rewrite_cdp_request_headers(data, host)
 
 
 def safe_runtime(runtime: dict[str, Any]) -> dict[str, Any]:

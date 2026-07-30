@@ -1,162 +1,154 @@
-import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { apiGet, apiPatch } from "./client";
-import { toast } from "sonner";
+import { useQuery } from "@tanstack/react-query";
+import { apiGet } from "./client";
 
-// Backend returns pagination object
-interface PaginatedResponse<T> {
+export interface PaginatedResponse<T> {
   items: T[];
   limit: number;
   offset: number;
   total: number;
 }
 
-// Raw types from backend
-interface RawTenant {
-  id: string;
-  name: string;
-  slug: string;
-  status: string;
-  subscription_plan: string;
-  subscription_status: string;
-  subscription_expires_at?: string;
-  member_count: number;
-  campaign_count: number;
-  created_at: string;
-  updated_at: string;
+export interface TenantPlan {
+  id?: string;
+  code?: string;
+  name?: string;
 }
 
-interface RawPlan {
-  id: string;
-  name: string;
-  description: string;
-  price_monthly: number;
-  price_yearly: number;
-  currency: string;
-  features: Record<string, any>;
-  limits: {
-    campaigns: number;
-    platform_accounts: number;
-    members: number;
-    keywords: number;
-    reply_templates: number;
-    monthly_tokens: number;
-    monthly_leads: number;
-  };
+export interface TenantUsage {
+  campaigns?: number;
+  members?: number;
+  platform_accounts?: number;
+  monthly_leads?: number;
+  monthly_tokens?: number;
+  [key: string]: number | undefined;
 }
 
-interface RawSystemUsage {
-  total_tenants: number;
-  active_tenants: number;
-  total_campaigns: number;
-  total_leads: number;
-  total_tokens_used: number;
-  total_platform_accounts: number;
-}
-
-// Normalized types for frontend
 export interface Tenant {
   id: string;
   name: string;
   slug: string;
-  status: "active" | "suspended" | "cancelled";
-  subscription_plan: string;
-  subscription_status: string;
-  subscription_expires_at?: string;
-  member_count: number;
-  campaign_count: number;
+  status: string;
+  timezone?: string;
+  plan?: TenantPlan;
+  usage?: TenantUsage;
   created_at: string;
   updated_at: string;
 }
 
-export interface SubscriptionPlan {
+export interface AdminUser {
   id: string;
-  name: string;
-  description: string;
-  price_monthly: number;
-  price_yearly: number;
-  currency: string;
-  features: Record<string, any>;
-  limits: {
-    campaigns: number;
-    platform_accounts: number;
-    members: number;
-    keywords: number;
-    reply_templates: number;
-    monthly_tokens: number;
-    monthly_leads: number;
-  };
+  email: string;
+  display_name: string;
+  status: string;
+  must_change_password: boolean;
+  is_system_admin: boolean;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface WorkerHealth {
+  online: boolean;
+  last_heartbeat_at?: string | null;
+  worker_count: number;
+}
+
+export interface SchedulerHealth {
+  online: boolean;
+  last_tick_at?: string | null;
+  due_campaign_count: number;
+  last_error?: string | null;
+  queued_tasks: number;
+  running_tasks: number;
+}
+
+export interface SystemHealth {
+  api: { status: string };
+  postgres: { status: string };
+  worker: WorkerHealth;
+  scheduler: SchedulerHealth;
+  queue: Record<string, number>;
+  browser_runtimes: { count: number };
+}
+
+export interface BrowserRuntime {
+  id: string;
+  tenant_id: string;
+  platform_account_id: string;
+  runtime_type: string;
+  status: string;
+  cdp_port: number;
+  browser_pid?: number | null;
+  started_at?: string | null;
+  last_health_check_at?: string | null;
+  stopped_at?: string | null;
+  last_error?: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface QueueItem {
+  id: string;
+  tenant_id: string;
+  campaign_id: string;
+  execution_id: string;
+  status: string;
+  priority: number;
+  queued_at: string;
+  started_at?: string | null;
+  finished_at?: string | null;
+  run_after: string;
+  attempt_count: number;
+  max_attempts: number;
+  error_type?: string | null;
+  error_message?: string | null;
 }
 
 export interface SystemUsage {
-  total_tenants: number;
-  active_tenants: number;
-  total_campaigns: number;
-  total_leads: number;
-  total_tokens_used: number;
-  total_platform_accounts: number;
-}
-
-function normalizeTenant(raw: RawTenant): Tenant {
-  return {
-    ...raw,
-    status: (raw.status as Tenant["status"]) || "active",
-  };
+  tenants: number;
+  users: number;
+  executions: number;
+  tokens: number;
+  worker_health: number;
 }
 
 export function useAdminTenants() {
   return useQuery({
     queryKey: ["admin", "tenants"],
-    queryFn: async () => {
-      const raw = await apiGet<PaginatedResponse<RawTenant>>("/api/admin/tenants");
-      return {
-        ...raw,
-        items: raw.items?.map(normalizeTenant) || [],
-      };
-    },
+    queryFn: () => apiGet<PaginatedResponse<Tenant>>("/api/admin/tenants?limit=200"),
   });
 }
 
-export function useAdminTenant(id: string) {
+export function useAdminUsers() {
   return useQuery({
-    queryKey: ["admin", "tenants", id],
-    queryFn: async () => {
-      const raw = await apiGet<RawTenant>(`/api/admin/tenants/${id}`);
-      return normalizeTenant(raw);
-    },
-    enabled: !!id,
-  });
-}
-
-export function useAdminPlans() {
-  return useQuery({
-    queryKey: ["admin", "plans"],
-    queryFn: () => apiGet<RawPlan[]>("/api/admin/plans"),
+    queryKey: ["admin", "users"],
+    queryFn: () => apiGet<PaginatedResponse<AdminUser>>("/api/admin/users?limit=200"),
   });
 }
 
 export function useSystemUsage() {
   return useQuery({
     queryKey: ["admin", "system-usage"],
-    queryFn: () => apiGet<RawSystemUsage>("/api/admin/system/usage"),
+    queryFn: () => apiGet<SystemUsage>("/api/admin/system/usage"),
   });
 }
 
-export function useUpdateTenantSubscription() {
-  const queryClient = useQueryClient();
-  return useMutation({
-    mutationFn: ({
-      id,
-      data,
-    }: {
-      id: string;
-      data: { plan_id: string; status?: string; expires_at?: string };
-    }) => apiPatch<RawTenant>(`/api/admin/tenants/${id}/subscription`, data),
-    onSuccess: () => {
-      toast.success("订阅已更新");
-      queryClient.invalidateQueries({ queryKey: ["admin", "tenants"] });
-    },
-    onError: (error: any) => {
-      toast.error(error.message || "更新失败");
-    },
+export function useSystemHealth() {
+  return useQuery({
+    queryKey: ["admin", "system-health"],
+    queryFn: () => apiGet<SystemHealth>("/api/admin/system/health"),
+  });
+}
+
+export function useAdminRuntimes() {
+  return useQuery({
+    queryKey: ["admin", "runtimes"],
+    queryFn: () => apiGet<PaginatedResponse<BrowserRuntime>>("/api/admin/system/runtimes?limit=200"),
+  });
+}
+
+export function useAdminQueue() {
+  return useQuery({
+    queryKey: ["admin", "queue"],
+    queryFn: () => apiGet<PaginatedResponse<QueueItem>>("/api/admin/system/queue?limit=200"),
   });
 }

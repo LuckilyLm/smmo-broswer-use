@@ -10,7 +10,7 @@ function intentLabel(value?: string | null) {
 }
 
 function statusLabel(value?: string | null) {
-  const map: Record<string, string> = { new: '未联系', assigned: '已分配', contacted: '已联系', invalid: '无效' }
+  const map: Record<string, string> = { new: '未联系', assigned: '已分配', contacted: '已联系', invalid: '无效', blocked: '已阻止', qualified: '已确认' }
   return map[value || ''] || value || '—'
 }
 
@@ -28,7 +28,7 @@ export default function LeadsInbox() {
   const filters = useMemo(() => ({ intent_level: intentFilter || undefined, search: search || undefined }), [intentFilter, search])
   const { data, isLoading, error } = useLeads(filters)
   const leads = data?.items || []
-  const { data: selected } = useLead(selectedId || '')
+  const { data: selected, isLoading: selectedLoading, error: selectedError } = useLead(selectedId || '')
   const contacted = useMarkLeadContacted()
   const invalid = useMarkLeadInvalid()
 
@@ -45,7 +45,7 @@ export default function LeadsInbox() {
     <div className="flex h-full min-h-0 flex-col overflow-hidden">
       {mobileView === 'detail' && <div className="flex items-center gap-2 border-b bg-white px-4 py-2 md:hidden" style={{ borderColor: 'var(--border)' }}><button className="flex items-center gap-1.5 text-sm font-medium" style={{ color: 'var(--primary)', minHeight: 44 }} onClick={() => setMobileView('list')}><ArrowLeft size={16} />返回列表</button></div>}
       <div className="flex min-h-0 flex-1 overflow-hidden">
-        <div className={`${mobileView === 'list' ? 'flex' : 'hidden'} flex-col border-r md:flex`} style={{ width: '100%', maxWidth: '100%', borderColor: 'var(--border)' }}>
+        <div className={`${mobileView === 'list' ? 'flex' : 'hidden'} w-full flex-col border-r md:flex md:w-[400px] md:shrink-0 xl:w-[420px]`} style={{ borderColor: 'var(--border)' }}>
           <div className="flex h-full w-full flex-col md:w-80">
             <div className="flex shrink-0 flex-col gap-2 border-b p-3" style={{ borderColor: 'var(--border)' }}>
               <div className="relative">
@@ -65,7 +65,7 @@ export default function LeadsInbox() {
           </div>
         </div>
         <div className={`${mobileView === 'detail' ? 'flex' : 'hidden'} min-w-0 flex-1 flex-col overflow-hidden bg-white md:flex`}>
-          {!selected ? <div className="flex flex-1 items-center justify-center text-sm text-gray-400">请选择线索</div> : (
+          {selectedLoading ? <div className="flex flex-1 items-center justify-center text-sm text-gray-400">正在加载线索详情...</div> : selectedError ? <div className="flex flex-1 items-center justify-center p-6 text-sm text-red-500">线索详情加载失败，请重新选择左侧线索。</div> : !selected ? <div className="flex flex-1 items-center justify-center text-sm text-gray-400">请选择左侧线索查看详情</div> : (
             <>
               <div className="shrink-0 border-b p-4" style={{ borderColor: 'var(--border)' }}>
                 <div className="flex flex-wrap items-start justify-between gap-3">

@@ -6,7 +6,11 @@ results
 .env.*
 !.env.production.example
 .git
+.claude
+.playwright-cli
 .pytest_cache
+**/.pytest_cache
+**/.pytest-tmp*
 **/__pycache__
 **/*.pyc
 artifacts

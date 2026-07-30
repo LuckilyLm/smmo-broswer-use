@@ -67,7 +67,9 @@ Run `py scripts/saas_backup_postgres.py`; credentials come from `DATABASE_URL` o
 
 ## Upgrade and rollback
 
-Before deployment, record the Git commit, image tags, and a verified PostgreSQL backup. Images use `saas-api:<commit>` and `saas-frontend:<commit>`. Upgrade by building the new tags, running Migration once, and starting services. Roll back by starting prior image tags only after checking migration compatibility. Code rollback is not database downgrade; automatic `alembic downgrade` is prohibited.
+Before deployment, record the Git commit, image tags, and a verified PostgreSQL backup. Images use separate tags for `saas-api`, `saas-worker`, `saas-frontend`, and `saas-browser-runtime`. Normal backend/frontend upgrades must build and restart only `saas-api`, `saas-worker`, and `frontend` with `--no-deps`; do not rebuild, retag, or restart `saas-browser-runtime`, because that container owns the live Chromium process and noVNC login session. Use `scripts/deploy_saas.ps1` or `deploy/deploy_saas.sh` for this path.
+
+Only update `saas-browser-runtime` when the browser runtime code, Chromium launch behavior, noVNC, or profile handling changes. On PowerShell, pass `-IncludeBrowserRuntime`; on shell, set `INCLUDE_BROWSER_RUNTIME=true`. This is expected to restart the browser container and may require re-login. Roll back by starting prior image tags only after checking migration compatibility. Code rollback is not database downgrade; automatic `alembic downgrade` is prohibited.
 
 ## Stop, uninstall, and troubleshooting
 

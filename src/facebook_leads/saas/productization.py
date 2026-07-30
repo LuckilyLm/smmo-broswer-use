@@ -370,6 +370,7 @@ class NotificationService:
 
     def execution_finished(self, execution: dict[str, Any]) -> None:
         status = str(execution.get("status") or "failed")
+        status_label = {"completed": "已完成", "partial": "部分完成", "failed": "失败", "cancelled": "已取消"}.get(status, "异常")
         notification_type = {
             "completed": "execution_completed",
             "partial": "execution_partial",
@@ -379,8 +380,8 @@ class NotificationService:
                 tenant_id=execution["tenant_id"],
                 notification_type=notification_type,
                 severity="success" if status == "completed" else "warning" if status == "partial" else "error",
-                title=f"Execution {status}",
-                message=f"Campaign execution finished with status {status}.",
+                title=f"任务执行{status_label}",
+                message=f"营销活动执行已结束，结果为：{status_label}。",
                 resource_type="execution",
                 resource_id=execution["id"],
                 dedupe_key=f"execution:{execution['id']}:{status}",

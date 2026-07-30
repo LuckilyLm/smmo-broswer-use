@@ -603,7 +603,7 @@ class SaaSService:
                         session=session,
                     )
                 )
-        self.logger.info("campaign keywords bulk created", extra={"tenant_id": context.tenant_id, "user_id": context.user_id, "campaign_id": campaign_id, "created": len(rows), "enabled": enabled})
+        self.logger.info("campaign keywords bulk created", extra={"tenant_id": context.tenant_id, "user_id": context.user_id, "campaign_id": campaign_id, "created_count": len(rows), "enabled": enabled})
         return {"items": rows, "created": len(rows)}
 
     def update_keyword(self, context: TenantContext, keyword_id: str, data: dict[str, Any]) -> dict[str, Any] | None:
@@ -856,21 +856,38 @@ class SaaSService:
         status = "matched" if result.matched else "blocked" if result.blocked_reason else "not_matched"
         return {**result.__dict__, "status": status, "selected_template_id": (template or {}).get("id"), "selected_template_name": (template or {}).get("name")}
 
+    def _with_execution_provenance(self, context: TenantContext, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        execution_ids = {row.get("execution_id") for row in rows if row.get("execution_id")}
+        provenance_by_execution: dict[str, str] = {}
+        for execution_id in execution_ids:
+            execution = self.storage.get_by_id("executions", execution_id, tenant_id=context.tenant_id)
+            snapshot = (execution or {}).get("config_snapshot") or {}
+            if snapshot.get("provenance") == "demo" or snapshot.get("demo_seed") is True:
+                provenance_by_execution[str(execution_id)] = "demo"
+        return [
+            {**row, "provenance": provenance_by_execution.get(str(row.get("execution_id")))}
+            for row in rows
+        ]
+
     def list_reply_candidates(self, context: TenantContext, filters: dict[str, Any] | None = None, *, limit: int = 100, offset: int = 0) -> dict[str, Any]:
         allowed = {"campaign_id", "execution_id", "reply_plan_id", "status"}
         safe_filters = {key: value for key, value in (filters or {}).items() if key in allowed}
         rows = self.storage.list("reply_candidates", tenant_id=context.tenant_id, filters=safe_filters, limit=_safe_limit(limit), offset=offset)
         total = self.storage.count("reply_candidates", tenant_id=context.tenant_id, filters=safe_filters)
-        return {"items": rows, "limit": _safe_limit(limit), "offset": offset, "total": total}
+        return {"items": self._with_execution_provenance(context, rows), "limit": _safe_limit(limit), "offset": offset, "total": total}
 
     def approve_reply_candidate(self, context: TenantContext, candidate_id: str) -> dict[str, Any]:
         candidate = self._require_reply_candidate(context, candidate_id)
         self._require_reply_approval_role(context)
         if candidate["status"] in {"approved", "sent"}:
+            self._sync_reply_plan(context, candidate.get("reply_plan_id"))
             return candidate
         if candidate["status"] not in {"pending_approval", "blocked"}:
             raise ServiceConflictError("candidate_not_approvable")
+        if candidate.get("blocked_reason") or not str(candidate.get("rendered_reply_text") or "").strip():
+            raise ServiceConflictError("candidate_blocked")
         row = self.storage.update_by_id("reply_candidates", candidate_id, {"status": "approved", "approved_by": context.user_id, "approved_at": utc_now(), "blocked_reason": None}, tenant_id=context.tenant_id) or candidate
+        self._sync_reply_plan(context, row.get("reply_plan_id"))
         self.audit.record(action="reply_candidate.approve", resource_type="reply_candidate", resource_id=candidate_id, tenant_id=context.tenant_id, user_id=context.user_id)
         return row
 
@@ -883,6 +900,7 @@ class SaaSService:
         if candidate["status"] not in {"pending_approval", "blocked", "approved"}:
             raise ServiceConflictError("candidate_not_rejectable")
         row = self.storage.update_by_id("reply_candidates", candidate_id, {"status": "rejected", "blocked_reason": reason_text, "rejected_by": context.user_id, "rejected_at": utc_now()}, tenant_id=context.tenant_id) or candidate
+        self._sync_reply_plan(context, row.get("reply_plan_id"))
         self.audit.record(action="reply_candidate.reject", resource_type="reply_candidate", resource_id=candidate_id, tenant_id=context.tenant_id, user_id=context.user_id)
         return row
 
@@ -892,6 +910,7 @@ class SaaSService:
         if candidate["status"] not in {"pending_approval", "blocked", "approved"}:
             raise ServiceConflictError("candidate_not_cancellable")
         row = self.storage.update_by_id("reply_candidates", candidate_id, {"status": "cancelled", "blocked_reason": "cancelled"}, tenant_id=context.tenant_id) or candidate
+        self._sync_reply_plan(context, row.get("reply_plan_id"))
         self.audit.record(action="reply_candidate.cancel", resource_type="reply_candidate", resource_id=candidate_id, tenant_id=context.tenant_id, user_id=context.user_id)
         return row
 
@@ -910,25 +929,30 @@ class SaaSService:
             raise ValueError("rendered_reply_invalid")
         if candidate["status"] in {"sent", "rejected", "cancelled"}:
             raise ServiceConflictError("candidate_content_locked")
-        return self.storage.update_by_id("reply_candidates", candidate_id, {"rendered_reply_text": content, "status": "pending_approval"}, tenant_id=context.tenant_id) or candidate
+        row = self.storage.update_by_id("reply_candidates", candidate_id, {"rendered_reply_text": content, "status": "pending_approval", "approved_by": None, "approved_at": None, "blocked_reason": None}, tenant_id=context.tenant_id) or candidate
+        self._sync_reply_plan(context, row.get("reply_plan_id"))
+        return row
 
     def list_reply_plans(self, context: TenantContext, filters: dict[str, Any] | None = None, *, limit: int = 100, offset: int = 0) -> dict[str, Any]:
         allowed = {"campaign_id", "execution_id", "status"}
         safe_filters = {key: value for key, value in (filters or {}).items() if key in allowed}
         rows = self.storage.list("reply_plans", tenant_id=context.tenant_id, filters=safe_filters, limit=_safe_limit(limit), offset=offset)
         total = self.storage.count("reply_plans", tenant_id=context.tenant_id, filters=safe_filters)
-        return {"items": rows, "limit": _safe_limit(limit), "offset": offset, "total": total}
+        return {"items": self._with_execution_provenance(context, rows), "limit": _safe_limit(limit), "offset": offset, "total": total}
 
     def approve_reply_plan(self, context: TenantContext, plan_id: str) -> dict[str, Any]:
         plan = self._require_reply_plan(context, plan_id)
         self._require_reply_approval_role(context, automatic_allowed=True)
-        if plan["status"] in {"approved", "pending_approval"}:
-            status = "approved"
-        elif plan["status"] == "executed":
+        plan = self._sync_reply_plan(context, plan_id) or plan
+        if plan["status"] == "executed":
             return plan
-        else:
+        if int(plan.get("total_candidates") or 0) <= 0:
+            raise ServiceConflictError("no_candidates")
+        if plan["status"] not in {"approved", "pending_approval"}:
             raise ServiceConflictError("plan_not_approvable")
-        row = self.storage.update_by_id("reply_plans", plan_id, {"status": status, "approved_by": context.user_id, "approved_at": utc_now()}, tenant_id=context.tenant_id) or plan
+        if int(plan.get("approved_count") or 0) <= 0:
+            raise ServiceConflictError("no_approved_candidates")
+        row = self.storage.update_by_id("reply_plans", plan_id, {"status": "approved", "approved_count": plan["approved_count"], "approved_by": context.user_id, "approved_at": utc_now(), "blocked_reason": None}, tenant_id=context.tenant_id) or plan
         self.audit.record(action="reply_plan.approve", resource_type="reply_plan", resource_id=plan_id, tenant_id=context.tenant_id, user_id=context.user_id)
         return row
 
@@ -942,12 +966,39 @@ class SaaSService:
     def execute_reply_plan(self, context: TenantContext, plan_id: str) -> dict[str, Any]:
         plan = self._require_reply_plan(context, plan_id)
         self._require_reply_approval_role(context, automatic_allowed=True)
+        plan = self._sync_reply_plan(context, plan_id) or plan
+        if plan["status"] == "executed":
+            return plan
+        if plan["status"] != "approved":
+            raise ServiceConflictError("plan_not_executable")
+        approved_candidates = self.storage.list("reply_candidates", tenant_id=context.tenant_id, filters={"reply_plan_id": plan_id, "status": "approved"}, limit=1000)
+        if not approved_candidates:
+            self._sync_reply_plan(context, plan_id)
+            raise ServiceConflictError("no_approved_candidates")
         guard = self._reply_send_guard(context, plan)
         if guard:
-            row = self.storage.update_by_id("reply_plans", plan_id, {"status": "blocked", "blocked_reason": guard}, tenant_id=context.tenant_id) or plan
-            self.storage.insert_ignore("reply_records", {"tenant_id": context.tenant_id, "reply_plan_id": plan_id, "campaign_id": plan["campaign_id"], "platform_account_id": plan["platform_account_id"], "comment_id": None, "reply_text": "", "status": "blocked", "verified": False, "error_type": guard, "error_message": guard, "idempotency_key": f"{plan_id}:{guard}"})
-            return row
-        return self.storage.update_by_id("reply_plans", plan_id, {"status": "executed", "executed_at": utc_now()}, tenant_id=context.tenant_id) or plan
+            for candidate in approved_candidates:
+                self.storage.insert_ignore(
+                    "reply_records",
+                    {
+                        "tenant_id": context.tenant_id,
+                        "reply_candidate_id": candidate["id"],
+                        "reply_plan_id": plan_id,
+                        "campaign_id": plan["campaign_id"],
+                        "platform_account_id": plan["platform_account_id"],
+                        "comment_id": candidate.get("comment_id"),
+                        "reply_text": candidate.get("rendered_reply_text") or "",
+                        "status": "blocked",
+                        "verified": False,
+                        "error_type": guard,
+                        "error_message": guard,
+                        "idempotency_key": f"{candidate['id']}:blocked:{guard}",
+                    },
+                )
+            return self.storage.update_by_id("reply_plans", plan_id, {"status": "blocked", "blocked_reason": guard}, tenant_id=context.tenant_id) or plan
+        # Sending remains deliberately unavailable here. A future sender must persist and
+        # verify each candidate outcome before marking the plan executed.
+        raise ServiceConflictError("reply_sender_not_implemented")
 
     def list_reply_records(self, context: TenantContext, *, limit: int = 100, offset: int = 0) -> dict[str, Any]:
         return self.query_reply_records(context, {}, limit=limit, offset=offset)
@@ -992,7 +1043,25 @@ class SaaSService:
             f"SELECT * FROM reply_records WHERE {where} ORDER BY created_at DESC LIMIT ? OFFSET ?",
             [*values, safe_limit, safe_offset],
         )
-        return {"items": rows, "limit": safe_limit, "offset": safe_offset, "total": int(total_row["count"] if total_row else 0)}
+        candidate_ids = {row.get("reply_candidate_id") for row in rows if row.get("reply_candidate_id")}
+        plan_ids = {row.get("reply_plan_id") for row in rows if row.get("reply_plan_id")}
+        candidates = {
+            candidate_id: self.storage.get_by_id("reply_candidates", candidate_id, tenant_id=context.tenant_id)
+            for candidate_id in candidate_ids
+        }
+        plans = {
+            plan_id: self.storage.get_by_id("reply_plans", plan_id, tenant_id=context.tenant_id)
+            for plan_id in plan_ids
+        }
+        execution_rows = [
+            {
+                **row,
+                "execution_id": (candidates.get(row.get("reply_candidate_id")) or {}).get("execution_id")
+                or (plans.get(row.get("reply_plan_id")) or {}).get("execution_id"),
+            }
+            for row in rows
+        ]
+        return {"items": self._with_execution_provenance(context, execution_rows), "limit": safe_limit, "offset": safe_offset, "total": int(total_row["count"] if total_row else 0)}
 
     def get_reply_record_detail(self, context: TenantContext, record_id: str) -> dict[str, Any]:
         record = self.storage.get_by_id("reply_records", record_id, tenant_id=context.tenant_id)
@@ -1005,10 +1074,11 @@ class SaaSService:
         campaign = self.storage.get_by_id("campaigns", record["campaign_id"], tenant_id=context.tenant_id)
         account = self.storage.get_by_id("platform_accounts", record["platform_account_id"], tenant_id=context.tenant_id)
         execution_id = (plan or {}).get("execution_id") or (candidate or {}).get("execution_id")
+        enriched_record = self._with_execution_provenance(context, [{**record, "execution_id": execution_id}])[0]
         template_id = (candidate or {}).get("reply_template_id")
         rule_id = (candidate or {}).get("matched_rule_id")
         return {
-            "record": record,
+            "record": enriched_record,
             "candidate": candidate,
             "plan": plan,
             "campaign": campaign,
@@ -1086,9 +1156,7 @@ class SaaSService:
                 },
             )
             inserted += 1
-        candidates = self.storage.list("reply_candidates", tenant_id=context.tenant_id, filters={"reply_plan_id": plan["id"]}, limit=1000)
-        approved = sum(1 for row in candidates if row["status"] == "approved")
-        return self.storage.update_by_id("reply_plans", plan["id"], {"total_candidates": len(candidates), "approved_count": approved, "blocked_reason": "no_candidates" if not candidates else None}, tenant_id=context.tenant_id) or plan
+        return self._sync_reply_plan(context, plan["id"]) or plan
 
     def list_reply_rules(self, context: TenantContext) -> list[dict[str, Any]]:
         return self.storage.list("reply_rules", tenant_id=context.tenant_id)
@@ -1417,6 +1485,32 @@ class SaaSService:
             "by_campaign": by_campaign,
         }
 
+    def repair_terminal_execution_queue_items(self) -> int:
+        terminal_statuses = {"completed", "partial", "failed", "cancelled"}
+        running_items = self.storage.list(
+            "execution_queue_items",
+            filters={"status": "running"},
+            limit=10000,
+        )
+        repaired = 0
+        for queue_item in running_items:
+            execution = self.storage.get_by_id(
+                "executions",
+                queue_item["execution_id"],
+                tenant_id=queue_item["tenant_id"],
+            )
+            if not execution or execution.get("status") not in terminal_statuses:
+                continue
+            status = "completed" if execution["status"] in {"completed", "partial"} else execution["status"]
+            self.storage.update_by_id(
+                "execution_queue_items",
+                queue_item["id"],
+                {"status": status, "finished_at": execution.get("finished_at") or utc_now()},
+                tenant_id=queue_item["tenant_id"],
+            )
+            repaired += 1
+        return repaired
+
     async def run_campaign(self, context: TenantContext, campaign_id: str) -> dict[str, Any]:
         self.logger.info("manual campaign run requested", extra={"tenant_id": context.tenant_id, "user_id": context.user_id, "campaign_id": campaign_id})
         execution = self.enqueue_campaign_execution(context, campaign_id, trigger_type="manual")
@@ -1590,7 +1684,7 @@ class SaaSService:
                 try:
                     result = await provider.run_campaign(self._provider_request(context, execution_campaign, keyword["keyword"], run_context, execution["id"]))
                     summary = _keyword_summary(result)
-                    status = "failed" if result.get("status") in {"failed", "not_implemented"} else "completed"
+                    status = "failed" if result.get("status") in {"failed", "not_implemented"} or result.get("error_type") else "completed"
                     if status == "completed":
                         completed += 1
                         persist_orchestrator_result(
@@ -1637,10 +1731,10 @@ class SaaSService:
             final_execution = self.storage.get_by_id("executions", execution["id"], tenant_id=context.tenant_id) or execution
             status = "cancelled" if final_execution.get("cancel_requested") else ("completed" if completed == len(keywords) else "partial" if completed else "failed")
             self._update_execution_aggregate(context, execution["id"], total=len(keywords), completed=completed, failed=failed, status=status, finished=True)
+            final_execution = self._finalize_execution_artifacts(context, execution["id"])
             if status in {"completed", "partial"}:
-                final_execution = self._finalize_execution_artifacts(context, execution["id"])
                 self.generate_reply_plan_for_execution(context, execution["id"])
-            run_logger.info("queue item run finished", extra={"status": status, "completed": completed, "failed": failed, "keyword_count": len(keywords), "execution_report": bool(final_execution if status in {"completed", "partial"} else None)})
+            run_logger.info("queue item run finished", extra={"status": status, "completed": completed, "failed": failed, "keyword_count": len(keywords), "execution_report": bool(final_execution)})
             return self.storage.update_by_id("execution_queue_items", queue_item["id"], {"status": "completed" if status in {"completed", "partial"} else status, "finished_at": utc_now()}, tenant_id=context.tenant_id) or queue_item
         except Exception as exc:
             self.storage.update_by_id("browser_runtimes", runtime["id"], {"status": "unhealthy", "last_error": "campaign run failed"}, tenant_id=context.tenant_id)
@@ -1683,6 +1777,12 @@ class SaaSService:
         root = safe_artifact_path(self.artifacts_root, "tenants", context.tenant_id, "executions", execution_id)
         keywords = self.storage.list("execution_keywords", tenant_id=context.tenant_id, filters={"execution_id": execution_id}, limit=1000)
         leads = self.storage.list("leads", tenant_id=context.tenant_id, filters={"campaign_id": execution["campaign_id"]}, limit=200)
+        campaign = self.storage.get_by_id("campaigns", execution["campaign_id"], tenant_id=context.tenant_id)
+        if campaign:
+            execution = {**execution, "campaign_name": campaign.get("name")}
+            account = self.storage.get_by_id("platform_accounts", campaign["platform_account_id"], tenant_id=context.tenant_id)
+            if account:
+                execution["platform_account_name"] = account.get("display_name")
         paths = write_execution_bundle(root, tenant_id=context.tenant_id, execution=execution, keywords=keywords, leads=leads)
         upload = upload_execution_artifacts(root, tenant_id=context.tenant_id, execution_id=execution_id, config=self._artifact_object_config())
         metadata = {
@@ -1771,6 +1871,19 @@ class SaaSService:
         now = utc_now()
         updated = self.storage.update_by_id("executions", execution["id"], {"status": "failed", "stage": "failed", "error_type": error_type, "error_message": message, "finished_at": now, "progress_percent": 100}, tenant_id=execution["tenant_id"])
         if updated:
+            context = TenantContext(tenant_id=execution["tenant_id"], user_id="worker", role="worker")
+            try:
+                updated = self._finalize_execution_artifacts(context, execution["id"]) or updated
+            except Exception as exc:
+                self.logger.warning(
+                    "failed execution artifact finalization failed",
+                    extra={
+                        "tenant_id": execution["tenant_id"],
+                        "campaign_id": execution.get("campaign_id"),
+                        "execution_id": execution["id"],
+                        "error_type": type(exc).__name__,
+                    },
+                )
             self.notifications.execution_finished(updated)
         log_context(self.logger, tenant_id=execution["tenant_id"], campaign_id=execution.get("campaign_id"), execution_id=execution["id"], queue_item_id=queue_item["id"]).error("queue item failed", extra={"error_type": error_type})
         return self.storage.update_by_id("execution_queue_items", queue_item["id"], {"status": "failed", "finished_at": now, "error_type": error_type, "error_message": message}, tenant_id=execution["tenant_id"]) or queue_item
@@ -2010,6 +2123,29 @@ class SaaSService:
                 if template and template.get("enabled") and not template.get("archived_at"):
                     return template
         return self.storage.find_one("reply_templates", {"tenant_id": context.tenant_id, "enabled": True, "is_default": True, "archived_at": None}, order_by=["priority", "created_at"])
+
+    def _sync_reply_plan(self, context: TenantContext, plan_id: str | None) -> dict[str, Any] | None:
+        if not plan_id:
+            return None
+        plan = self.storage.get_by_id("reply_plans", plan_id, tenant_id=context.tenant_id)
+        if not plan:
+            return None
+        candidates = self.storage.list("reply_candidates", tenant_id=context.tenant_id, filters={"reply_plan_id": plan_id}, limit=1000)
+        total = len(candidates)
+        approved = sum(1 for candidate in candidates if candidate.get("status") == "approved")
+        sent = sum(1 for candidate in candidates if candidate.get("status") == "sent")
+        failed = sum(1 for candidate in candidates if candidate.get("status") == "failed")
+        payload: dict[str, Any] = {"total_candidates": total, "approved_count": approved, "sent_count": sent, "failed_count": failed}
+        if total == 0:
+            payload.update({"status": "blocked", "blocked_reason": "no_candidates", "approved_by": None, "approved_at": None})
+        elif plan.get("status") not in {"executed", "cancelled"}:
+            if approved == 0:
+                payload.update({"status": "pending_approval", "blocked_reason": None, "approved_by": None, "approved_at": None})
+            elif plan.get("approved_by") or plan.get("reply_mode") == "automatic":
+                payload.update({"status": "approved", "blocked_reason": None})
+            else:
+                payload.update({"status": "pending_approval", "blocked_reason": None})
+        return self.storage.update_by_id("reply_plans", plan_id, payload, tenant_id=context.tenant_id) or plan
 
     def _reply_send_guard(self, context: TenantContext, plan: dict[str, Any]) -> str | None:
         campaign = self._require_campaign(context, plan["campaign_id"])

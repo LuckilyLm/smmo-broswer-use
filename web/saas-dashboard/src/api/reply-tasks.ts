@@ -1,6 +1,9 @@
-import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
+import { useQuery, useMutation, useQueryClient, type QueryClient } from "@tanstack/react-query";
 import { apiGet, apiPost } from "./client";
 import { toast } from "sonner";
+
+export type ReplyCandidateStatus = "pending_approval" | "approved" | "blocked" | "rejected" | "cancelled" | "sent" | "failed";
+export type ReplyPlanStatus = "pending_approval" | "approved" | "blocked" | "executed" | "cancelled";
 
 export interface ReplyCandidate {
   id: string;
@@ -17,9 +20,10 @@ export interface ReplyCandidate {
   rendered_reply_text?: string | null;
   source_content_url?: string | null;
   direct_comment_url?: string | null;
-  status: "pending_approval" | "approved" | "rejected" | "cancelled" | "sent" | "failed";
+  status: ReplyCandidateStatus;
   blocked_reason?: string | null;
   last_error?: string | null;
+  provenance?: string;
   created_at: string;
 }
 
@@ -28,7 +32,7 @@ export interface ReplyPlan {
   campaign_id: string;
   execution_id?: string | null;
   platform_account_id?: string;
-  status: "pending_approval" | "approved" | "executing" | "completed" | "failed" | "cancelled" | "blocked";
+  status: ReplyPlanStatus;
   reply_mode?: string;
   total_candidates: number;
   approved_count: number;
@@ -36,10 +40,28 @@ export interface ReplyPlan {
   failed_count: number;
   blocked_reason?: string | null;
   executed_at?: string | null;
+  provenance?: string;
   created_at: string;
 }
 
-export function useReplyCandidates(status?: string) {
+export function canApproveReplyPlan(plan: Pick<ReplyPlan, "status" | "total_candidates">) {
+  return plan.status === "pending_approval" && plan.total_candidates > 0;
+}
+
+export function invalidateReplyLifecycleQueries(queryClient: QueryClient) {
+  for (const queryKey of [
+    ["reply-plans"],
+    ["reply-candidates"],
+    ["reply-records"],
+    ["reply-record"],
+    ["executions"],
+    ["dashboard"],
+  ]) {
+    queryClient.invalidateQueries({ queryKey });
+  }
+}
+
+export function useReplyCandidates(status?: ReplyCandidateStatus) {
   const params = new URLSearchParams();
   if (status) params.append("status", status);
 
@@ -53,7 +75,7 @@ export function useReplyCandidates(status?: string) {
   });
 }
 
-export function useReplyPlans(status?: string) {
+export function useReplyPlans(status?: ReplyPlanStatus) {
   const params = new URLSearchParams();
   if (status) params.append("status", status);
 
@@ -74,7 +96,7 @@ export function useApproveCandidate() {
       apiPost<ReplyCandidate>(`/api/reply-candidates/${id}/approve`, {}),
     onSuccess: () => {
       toast.success("已批准");
-      queryClient.invalidateQueries({ queryKey: ["reply-candidates"] });
+      invalidateReplyLifecycleQueries(queryClient);
     },
     onError: (error: any) => {
       toast.error(error.message || "操作失败");
@@ -89,7 +111,7 @@ export function useRejectCandidate() {
       apiPost<ReplyCandidate>(`/api/reply-candidates/${id}/reject`, { reason }),
     onSuccess: () => {
       toast.success("已拒绝");
-      queryClient.invalidateQueries({ queryKey: ["reply-candidates"] });
+      invalidateReplyLifecycleQueries(queryClient);
     },
     onError: (error: any) => {
       toast.error(error.message || "操作失败");
@@ -104,7 +126,7 @@ export function useCancelCandidate() {
       apiPost<ReplyCandidate>(`/api/reply-candidates/${id}/cancel`, {}),
     onSuccess: () => {
       toast.success("已取消");
-      queryClient.invalidateQueries({ queryKey: ["reply-candidates"] });
+      invalidateReplyLifecycleQueries(queryClient);
     },
     onError: (error: any) => {
       toast.error(error.message || "操作失败");
@@ -119,7 +141,7 @@ export function useBulkApproveCandidates() {
       apiPost("/api/reply-candidates/bulk-approve", { candidate_ids: ids }),
     onSuccess: () => {
       toast.success("批量批准成功");
-      queryClient.invalidateQueries({ queryKey: ["reply-candidates"] });
+      invalidateReplyLifecycleQueries(queryClient);
     },
     onError: (error: any) => {
       toast.error(error.message || "批量操作失败");
@@ -134,7 +156,7 @@ export function useBulkRejectCandidates() {
       apiPost("/api/reply-candidates/bulk-reject", { candidate_ids: ids, reason }),
     onSuccess: () => {
       toast.success("批量拒绝成功");
-      queryClient.invalidateQueries({ queryKey: ["reply-candidates"] });
+      invalidateReplyLifecycleQueries(queryClient);
     },
     onError: (error: any) => {
       toast.error(error.message || "批量操作失败");
@@ -149,7 +171,7 @@ export function useApprovePlan() {
       apiPost<ReplyPlan>(`/api/reply-plans/${id}/approve`, {}),
     onSuccess: () => {
       toast.success("计划已批准");
-      queryClient.invalidateQueries({ queryKey: ["reply-plans"] });
+      invalidateReplyLifecycleQueries(queryClient);
     },
     onError: (error: any) => {
       toast.error(error.message || "操作失败");
@@ -164,7 +186,7 @@ export function useCancelPlan() {
       apiPost<ReplyPlan>(`/api/reply-plans/${id}/cancel`, {}),
     onSuccess: () => {
       toast.success("计划已取消");
-      queryClient.invalidateQueries({ queryKey: ["reply-plans"] });
+      invalidateReplyLifecycleQueries(queryClient);
     },
     onError: (error: any) => {
       toast.error(error.message || "操作失败");
@@ -179,7 +201,7 @@ export function useExecutePlan() {
       apiPost<ReplyPlan>(`/api/reply-plans/${id}/execute`, {}),
     onSuccess: () => {
       toast.success("计划开始执行");
-      queryClient.invalidateQueries({ queryKey: ["reply-plans"] });
+      invalidateReplyLifecycleQueries(queryClient);
     },
     onError: (error: any) => {
       toast.error(error.message || "执行失败");

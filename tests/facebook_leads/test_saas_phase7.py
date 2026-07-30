@@ -16,7 +16,7 @@ from src.facebook_leads.saas.models import TenantContext
 from src.facebook_leads.saas.providers import FacebookProvider, InstagramProvider, OzonProvider, ProviderRunRequest, TikTokProvider, XProvider
 from src.facebook_leads.saas.runtime import safe_runtime
 from src.facebook_leads.saas.scheduler import CampaignScheduler
-from src.facebook_leads.saas.seed import seed_demo_data
+from src.facebook_leads.saas.seed import DEMO_ADMIN_EMAIL, seed_demo_data
 from src.facebook_leads.saas.service import SaaSService
 from src.facebook_leads.saas.storage import SaaSStorage
 from src.facebook_leads.saas.worker import ExecutionWorker
@@ -292,7 +292,7 @@ def test_lead_pagination_filter_and_token_details_are_tenant_scoped(tmp_path):
 def test_saas_api_login_dashboard_and_campaign_run(tmp_path):
     service = make_service(tmp_path, runner=fake_runner_factory(tmp_path))
     seed_demo_data(service.storage, password="pass123456")
-    seeded_session = service.login("admin@example.com", "pass123456")
+    seeded_session = service.login(DEMO_ADMIN_EMAIL, "pass123456")
     seeded_context = service.context_from_token(seeded_session["access_token"])
     seeded_account = service.list_platform_accounts(seeded_context)[0]
     service.runtime_registry.provision_logged_in(seeded_context, seeded_account["id"])
@@ -300,7 +300,7 @@ def test_saas_api_login_dashboard_and_campaign_run(tmp_path):
     app = create_app(service=service)
     client = TestClient(app)
 
-    login = client.post("/api/auth/login", json={"email": "admin@example.com", "password": "pass123456"})
+    login = client.post("/api/auth/login", json={"email": DEMO_ADMIN_EMAIL, "password": "pass123456"})
     assert login.status_code == 200
     assert "httponly" in login.headers["set-cookie"].lower()
     assert "samesite=lax" in login.headers["set-cookie"].lower()

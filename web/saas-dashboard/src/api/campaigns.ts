@@ -2,6 +2,8 @@ import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { apiGet, apiPost, apiPatch, apiDelete } from "./client";
 import { toast } from "sonner";
 
+export type CampaignTargetPolicy = "discovery_only" | "owned_only" | "allowlist";
+
 // Raw types from backend
 interface RawCampaign {
   id: string;
@@ -11,7 +13,7 @@ interface RawCampaign {
   platform_account_name?: string;
   platform?: string;
   status: string;
-  target_policy?: string;
+  target_policy?: CampaignTargetPolicy;
   max_contents?: number;
   max_comments?: number;
   min_confidence?: number;
@@ -58,7 +60,7 @@ export interface Campaign {
   platform_account_id: string;
   platform_account_name: string;
   status: string;
-  target_policy?: string;
+  target_policy?: CampaignTargetPolicy;
   max_contents?: number;
   max_comments?: number;
   min_confidence?: number;
@@ -104,7 +106,7 @@ export interface CampaignPayload extends Record<string, unknown> {
   description?: string | null;
   platform_account_id: string;
   status?: string;
-  target_policy?: string;
+  target_policy?: CampaignTargetPolicy;
   max_contents?: number;
   max_comments?: number;
   min_confidence?: number;
@@ -265,6 +267,10 @@ export function useRunCampaign() {
       toast.success("活动已开始执行");
       queryClient.invalidateQueries({ queryKey: ["campaigns"] });
       queryClient.invalidateQueries({ queryKey: ["executions"] });
+      queryClient.invalidateQueries({ queryKey: ["dashboard"] });
+      queryClient.invalidateQueries({ queryKey: ["reply-candidates"] });
+      queryClient.invalidateQueries({ queryKey: ["reply-plans"] });
+      queryClient.invalidateQueries({ queryKey: ["reply-records"] });
     },
     onError: (error: any) => {
       toast.error(error.message || "执行失败");

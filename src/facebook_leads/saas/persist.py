@@ -50,7 +50,18 @@ def persist_orchestrator_result(
         if execution_id:
             execution_payload = storage.get_by_id("executions", execution_id, tenant_id=tenant_id, session=session)
             if execution_payload:
-                execution_payload = storage.update_by_id("executions", execution_id, execution_data, tenant_id=tenant_id, session=session) or execution_payload
+                keyword_metrics = {
+                    key: value
+                    for key, value in execution_data.items()
+                    if key not in {"status", "stage", "started_at", "finished_at"}
+                }
+                execution_payload = storage.update_by_id(
+                    "executions",
+                    execution_id,
+                    keyword_metrics,
+                    tenant_id=tenant_id,
+                    session=session,
+                ) or execution_payload
             else:
                 execution_payload = storage.insert("executions", {"id": execution_id, **execution_data}, session=session)
         else:
@@ -117,7 +128,7 @@ def _lead_payload(raw: dict[str, Any], tenant_id: str, campaign_id: str, platfor
         "llm_reason": review.get("reason_zh") or raw.get("final_reason_zh"),
         "suggested_reply": review.get("suggested_reply") or raw.get("final_suggested_reply"),
         "ownership_status": raw.get("ownership_status"),
-        "reply_allowed": bool(raw.get("reply_allowed")),
+        "reply_allowed": raw.get("reply_allowed") if "reply_allowed" in raw else None,
         "status": "blocked" if raw.get("reply_allowed") is False else "new",
         "matched_search_keywords": [keyword] if keyword else [],
         "first_discovered_at": discovered_at,

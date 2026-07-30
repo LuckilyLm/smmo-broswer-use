@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sys
 from types import SimpleNamespace
 
@@ -52,7 +53,10 @@ def test_write_execution_bundle_creates_single_html_and_json_report(tmp_path):
         encoding="utf-8",
     )
     (run_dir / "lead_report.json").write_text('{"keyword":"steel supplier","contents":[]}', encoding="utf-8")
-    (run_dir / "batch_reply_plan.json").write_text('{"summary":{"eligible_count":0}}', encoding="utf-8")
+    (run_dir / "batch_reply_plan.json").write_text(
+        '{"summary":{"eligible_count":0,"selected_count":0,"blocked_count":1},"items":[{"eligible":false,"blocking_reasons":["source_not_allowed","confidence_below_threshold"]}]}',
+        encoding="utf-8",
+    )
 
     paths = write_execution_bundle(
         root,
@@ -64,7 +68,70 @@ def test_write_execution_bundle_creates_single_html_and_json_report(tmp_path):
 
     assert paths["execution_report_json"].exists()
     assert paths["execution_report_html"].exists()
-    assert "steel supplier" in paths["execution_report_html"].read_text(encoding="utf-8")
+    payload = json.loads(paths["execution_report_json"].read_text(encoding="utf-8"))
+    assert payload["summary"]["eligible_count"] == 0
+    assert payload["summary"]["selected_count"] == 0
+    assert payload["summary"]["reply_outcome"] == {
+        "status": "no_eligible_candidates",
+        "eligible_count": 0,
+        "selected_count": 0,
+        "blockage_reasons": {"source_not_allowed": 1, "confidence_below_threshold": 1},
+    }
+    assert payload["runs"][0]["reply_outcome"]["status"] == "no_eligible_candidates"
+    assert payload["runs"][0]["blockage_reasons"] == {
+        "source_not_allowed": 1,
+        "confidence_below_threshold": 1,
+    }
+    report_html = paths["execution_report_html"].read_text(encoding="utf-8")
+    assert "steel supplier" in report_html
+    assert "暂无符合发送条件的候选" in report_html
+    assert "来源不在允许范围" in report_html
+    assert "置信度低于阈值" in report_html
+    assert "输入 Token" in report_html
+    assert "输出 Token" in report_html
+    assert "no_eligible_candidates" not in report_html
+    assert "source_not_allowed" not in report_html
+    assert "confidence_below_threshold" not in report_html
+    assert "Prompt Token" not in report_html
+    assert "Completion Token" not in report_html
+    assert "&#x27;" not in report_html
+
+
+def test_execution_report_localizes_internal_runtime_and_campaign_values(tmp_path):
+    root = tmp_path / "execution"
+    run_dir = root / "runs" / "run_1"
+    run_dir.mkdir(parents=True)
+    (run_dir / "scan_result.json").write_text(
+        '{"keyword":"solar lantern","status":"partial","login_state":"logged_out","contents":[],"comments":[]}',
+        encoding="utf-8",
+    )
+    (run_dir / "lead_report.json").write_text('{"keyword":"solar lantern","contents":[]}', encoding="utf-8")
+    (run_dir / "batch_reply_plan.json").write_text(
+        '{"summary":{"eligible_count":0,"selected_count":0},"items":[{"eligible":false,"blocking_reasons":["reply_disabled"]}]}',
+        encoding="utf-8",
+    )
+
+    paths = write_execution_bundle(
+        root,
+        tenant_id="tenant_1",
+        execution={"id": "exec_1", "campaign_id": "camp_1", "status": "partial", "send_disabled": True},
+        keywords=[
+            {
+                "keyword": "solar lantern",
+                "status": "partial",
+                "target_policy": "discovery_only",
+                "reply_mode": "manual_approval",
+                "lead_detection_mode": "rules_with_llm",
+            }
+        ],
+        leads=[],
+    )
+
+    report_html = paths["execution_report_html"].read_text(encoding="utf-8")
+    for text in ["部分完成", "未登录", "回复功能关闭", "安全模式", "人工审批", "仅发现公开线索", "规则 + 大模型"]:
+        assert text in report_html
+    for internal in ["logged_out", "reply_disabled", "manual_approval", "discovery_only", "rules_with_llm"]:
+        assert internal not in report_html
 
 
 def test_upload_execution_artifacts_disabled_without_configuration(tmp_path):

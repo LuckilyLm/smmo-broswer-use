@@ -1,11 +1,13 @@
 import { useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { Bell, CheckCheck, ExternalLink } from 'lucide-react'
+import { useTranslation } from 'react-i18next'
 import { useNotifications, useMarkAllNotificationsRead, useMarkNotificationRead } from '../api/notifications'
 import PageContainer from '../components/layout/PageContainer'
 import { EmptyState, ErrorState } from '../components/ui/PageState'
 import { Skeleton } from '@/components/ui/skeleton'
 import { Button } from '@/components/ui/button'
+import { formatNotificationMessage, formatNotificationTitle } from '../utils/formatters'
 
 const tabs = [{ key: 'all', label: '全部' }, { key: 'unread', label: '未读' }] as const
 type Tab = typeof tabs[number]['key']
@@ -16,6 +18,7 @@ const typeStyle: Record<string, { color: string; bg: string }> = {
 
 export default function NotificationCenter() {
   const navigate = useNavigate()
+  const { t } = useTranslation()
   const [activeTab, setActiveTab] = useState<Tab>('all')
   const { data, isLoading, error, refetch, isFetching } = useNotifications(activeTab === 'unread', 50)
   const markAll = useMarkAllNotificationsRead()
@@ -34,7 +37,7 @@ export default function NotificationCenter() {
         <Button variant="outline" size="lg" disabled={unreadCount === 0 || markAll.isPending} onClick={() => markAll.mutate()}><CheckCheck className="h-4 w-4" />{markAll.isPending ? '处理中…' : '全部标为已读'}</Button>
       </header>
       <div className="flex border-b">{tabs.map((tab) => <button key={tab.key} onClick={() => setActiveTab(tab.key)} className={`min-h-11 border-b-2 px-4 text-sm font-medium ${activeTab === tab.key ? 'border-primary text-primary' : 'border-transparent text-muted-foreground'}`}>{tab.label}</button>)}{isFetching && <span className="ml-auto self-center text-xs text-muted-foreground">正在刷新…</span>}</div>
-      {items.length === 0 ? <EmptyState title={activeTab === 'unread' ? '没有未读通知' : '暂无通知'} /> : <div className="flex flex-col gap-2">{items.map((item) => { const style = typeStyle[item.type] || typeStyle.info; return <article key={item.id} className={`flex gap-3 rounded-xl border p-4 ${item.read ? 'bg-card' : 'border-primary/25 bg-accent/20'}`}><div className="mt-0.5 flex h-9 w-9 shrink-0 items-center justify-center rounded-lg" style={{ background: style.bg, color: style.color }}><Bell className="h-4 w-4" /></div><div className="min-w-0 flex-1"><div className="flex flex-wrap items-start justify-between gap-2"><h2 className="text-sm font-semibold">{item.title}</h2><time className="text-xs text-muted-foreground">{new Date(item.created_at).toLocaleString('zh-CN')}</time></div><p className="mt-1 break-words text-sm leading-relaxed text-muted-foreground">{item.message}</p><div className="mt-3 flex flex-wrap gap-2">{!item.read && <Button variant="outline" size="sm" disabled={markRead.isPending} onClick={() => markRead.mutate(item.id)}>标为已读</Button>}{item.action_url && <Button variant="ghost" size="sm" onClick={() => navigate(item.action_url!)}><ExternalLink className="h-3.5 w-3.5" />{item.action_label || '查看详情'}</Button>}</div></div></article> })}</div>}
+      {items.length === 0 ? <EmptyState title={activeTab === 'unread' ? '没有未读通知' : '暂无通知'} /> : <div className="flex flex-col gap-2">{items.map((item) => { const style = typeStyle[item.severity || item.type] || typeStyle.info; const title = formatNotificationTitle(item.type, t); const message = formatNotificationMessage(item.type, t); return <article key={item.id} className={`flex gap-3 rounded-xl border p-4 ${item.read ? 'bg-card' : 'border-primary/25 bg-accent/20'}`}><div className="mt-0.5 flex h-9 w-9 shrink-0 items-center justify-center rounded-lg" style={{ background: style.bg, color: style.color }}><Bell className="h-4 w-4" /></div><div className="min-w-0 flex-1"><div className="flex flex-wrap items-start justify-between gap-2"><h2 className="text-sm font-semibold">{title}</h2><time className="text-xs text-muted-foreground">{new Date(item.created_at).toLocaleString('zh-CN')}</time></div><p className="mt-1 break-words text-sm leading-relaxed text-muted-foreground">{message}</p><div className="mt-3 flex flex-wrap gap-2">{!item.read && <Button variant="outline" size="sm" disabled={markRead.isPending} onClick={() => markRead.mutate(item.id)}>标为已读</Button>}{item.action_url && <Button variant="ghost" size="sm" onClick={() => navigate(item.action_url!)}><ExternalLink className="h-3.5 w-3.5" />{item.action_label || '查看详情'}</Button>}</div></div></article> })}</div>}
     </PageContainer>
   )
 }

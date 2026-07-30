@@ -20,6 +20,9 @@ class ProductionConfig:
     browser_profile_root: Path
     deployment_mode: str
     runtime_host: str
+    browser_cdp_base_url: str
+    browser_cdp_bind_address: str
+    browser_runtime_control_url: str | None
     browser_cdp_port_start: int
     browser_cdp_port_end: int
     browser_headless: bool
@@ -76,8 +79,8 @@ class ProductionConfig:
     def runtime_available(self) -> bool:
         return (
             self.deployment_mode == "browser-use"
-            and self.runtime_host == "local"
-            and self.local_browser_supported
+            and self.runtime_host in {"local", "remote"}
+            and (self.runtime_host == "remote" or self.local_browser_supported)
         )
 
     def runtime_capabilities(self) -> dict[str, object]:
@@ -88,6 +91,7 @@ class ProductionConfig:
             "local_browser_supported": self.local_browser_supported,
             "browser_backend": "browser-use",
             "browser_headless": self.browser_headless,
+            "browser_cdp_base_url": self.browser_cdp_base_url,
         }
 
     @classmethod
@@ -113,8 +117,14 @@ class ProductionConfig:
         if deployment_mode not in {"browser-use", "control-plane-only"}:
             raise RuntimeError("SAAS_DEPLOYMENT_MODE must be browser-use or control-plane-only")
         runtime_host = env.get("SAAS_RUNTIME_HOST", "local").strip().lower()
-        if runtime_host != "local":
-            raise RuntimeError("SAAS_RUNTIME_HOST must be local")
+        if runtime_host not in {"local", "remote"}:
+            raise RuntimeError("SAAS_RUNTIME_HOST must be local or remote")
+        browser_cdp_base_url = env.get("SAAS_BROWSER_CDP_BASE_URL", "").strip().rstrip("/")
+        if not browser_cdp_base_url:
+            browser_cdp_base_url = "http://127.0.0.1" if runtime_host == "local" else "http://saas-browser-runtime"
+        browser_runtime_control_url = env.get("SAAS_BROWSER_RUNTIME_CONTROL_URL", "").strip().rstrip("/") or None
+        if runtime_host == "remote" and not browser_runtime_control_url:
+            browser_runtime_control_url = "http://saas-browser-runtime:8001"
         cdp_port_start = _int(env, "SAAS_BROWSER_CDP_PORT_START", 9300, minimum=1)
         cdp_port_end = _int(env, "SAAS_BROWSER_CDP_PORT_END", 9399, minimum=1)
         if cdp_port_end < cdp_port_start:
@@ -132,6 +142,9 @@ class ProductionConfig:
             browser_profile_root=Path(env.get("SAAS_BROWSER_PROFILE_ROOT", "data/browser_profiles")),
             deployment_mode=deployment_mode,
             runtime_host=runtime_host,
+            browser_cdp_base_url=browser_cdp_base_url,
+            browser_cdp_bind_address=env.get("SAAS_BROWSER_CDP_BIND_ADDRESS", "127.0.0.1").strip() or "127.0.0.1",
+            browser_runtime_control_url=browser_runtime_control_url,
             browser_cdp_port_start=cdp_port_start,
             browser_cdp_port_end=cdp_port_end,
             browser_headless=_bool(env.get("SAAS_BROWSER_HEADLESS"), default=platform.system() != "Windows"),

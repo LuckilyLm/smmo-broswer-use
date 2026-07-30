@@ -3,6 +3,9 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import socket
+import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -17,6 +20,96 @@ from src.facebook_leads.saas.runtime import BrowserRuntimeRegistry
 from src.facebook_leads.saas.service import SaaSService
 from src.facebook_leads.saas.storage import SaaSStorage
 from src.facebook_leads.saas.worker import ExecutionWorker
+
+
+def test_cdp_proxy_rewrites_host_header_and_releases_port():
+    upstream = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    upstream.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    upstream.bind(("127.0.0.1", 0))
+    port = upstream.getsockname()[1]
+    upstream.listen(1)
+    captured: list[bytes] = []
+
+    def serve_once():
+        client, _ = upstream.accept()
+        with client:
+            data = client.recv(4096)
+            captured.append(data)
+            body = (
+                b'{"webSocketDebuggerUrl":"ws://127.0.0.1:'
+                + str(port).encode("ascii")
+                + b'/devtools/browser/test"}'
+            )
+            client.sendall(b"HTTP/1.1 200 OK\r\nContent-Length: " + str(len(body)).encode("ascii") + b"\r\n\r\n" + body)
+
+    thread = threading.Thread(target=serve_once, daemon=True)
+    thread.start()
+    proxy = runtime_module._CdpPortForwarder(bind_host="127.0.0.2", port=port)
+    proxy.start()
+    try:
+        with socket.create_connection(("127.0.0.2", port), timeout=3) as client:
+            client.sendall(b"GET /json/version HTTP/1.1\r\nHost: saas-browser-runtime:9999\r\nConnection: close\r\n\r\n")
+            response = client.recv(4096)
+            assert b"200 OK" in response
+            expected_body = b'{"webSocketDebuggerUrl":"ws://127.0.0.2:' + str(port).encode("ascii") + b'/devtools/browser/test"}'
+            assert expected_body in response
+            assert b"ws://127.0.0.1:" not in response
+            assert b"Content-Length: " + str(len(expected_body)).encode("ascii") in response
+        thread.join(timeout=3)
+        assert captured
+        assert b"Host: 127.0.0.1:" + str(port).encode("ascii") in captured[0]
+        assert b"saas-browser-runtime" not in captured[0]
+    finally:
+        proxy.close()
+        upstream.close()
+
+    deadline = time.time() + 3
+    while True:
+        try:
+            probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            probe.bind(("127.0.0.2", port))
+            probe.close()
+            break
+        except OSError:
+            if time.time() > deadline:
+                raise
+            time.sleep(0.05)
+
+
+def test_cdp_proxy_buffers_split_initial_headers():
+    upstream = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    upstream.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    upstream.bind(("127.0.0.1", 0))
+    port = upstream.getsockname()[1]
+    upstream.listen(1)
+    captured: list[bytes] = []
+
+    def serve_once():
+        client, _ = upstream.accept()
+        with client:
+            data = client.recv(4096)
+            captured.append(data)
+            client.sendall(b"HTTP/1.1 101 Switching Protocols\r\nContent-Length: 0\r\n\r\n")
+
+    thread = threading.Thread(target=serve_once, daemon=True)
+    thread.start()
+    proxy = runtime_module._CdpPortForwarder(bind_host="127.0.0.2", port=port)
+    proxy.start()
+    try:
+        with socket.create_connection(("127.0.0.2", port), timeout=3) as client:
+            client.sendall(b"GET /devtools/browser/test HTTP/1.1\r\nHo")
+            time.sleep(0.05)
+            client.sendall(b"st: saas-browser-runtime:9999\r\nOrigin: http://saas-browser-runtime:9999\r\nUpgrade: websocket\r\n\r\n")
+            assert b"101 Switching Protocols" in client.recv(4096)
+        thread.join(timeout=3)
+        assert captured
+        assert b"Host: 127.0.0.1:" + str(port).encode("ascii") in captured[0]
+        assert b"Origin: http://127.0.0.1:" + str(port).encode("ascii") in captured[0]
+        assert b"saas-browser-runtime" not in captured[0]
+    finally:
+        proxy.close()
+        upstream.close()
 
 
 def test_runtime_retries_cdp_port_unique_collision(tmp_path, monkeypatch):
@@ -46,6 +139,52 @@ def test_runtime_retries_cdp_port_unique_collision(tmp_path, monkeypatch):
 
     assert runtime["cdp_port"] == 9401
     assert calls == 1
+
+
+def test_remote_runtime_registers_service_cdp_and_delegates_controls(tmp_path, monkeypatch):
+    storage = SaaSStorage(tmp_path / "remote.sqlite")
+    registry = BrowserRuntimeRegistry(
+        storage,
+        profiles_root=tmp_path / "profiles",
+        cdp_port_start=9300,
+        cdp_port_end=9300,
+        runtime_host="remote",
+        cdp_base_url="http://saas-browser-runtime",
+        remote_control_url="http://saas-browser-runtime:8001",
+    )
+    service = SaaSService(storage, runtime_registry=registry)
+    tenant = service.create_tenant("Remote", "remote")
+    user = service.create_user("remote@example.com", "pass123456", "Admin")
+    service.add_user_to_tenant(tenant["id"], user["id"], role="admin")
+    context = service.context_from_token(service.login("remote@example.com", "pass123456")["access_token"])
+    account = service.create_platform_account(context, {"platform": "facebook", "display_name": "Page"})
+    calls: list[tuple[str, str, dict]] = []
+
+    def remote_control(method: str, path: str, payload: dict):
+        calls.append((method, path, payload))
+        runtime = registry.get_runtime(context, account["id"])
+        if path.endswith("/start") and runtime:
+            storage.update_by_id("browser_runtimes", runtime["id"], {"status": "running", "browser_pid": 123}, tenant_id=context.tenant_id)
+        if path.endswith("/stop") and runtime:
+            storage.update_by_id("browser_runtimes", runtime["id"], {"status": "stopped", "browser_pid": None}, tenant_id=context.tenant_id)
+        if path.endswith("/check-login"):
+            storage.update_by_id("platform_accounts", account["id"], {"login_status": "logged_in", "connection_status": "connected"}, tenant_id=context.tenant_id)
+        return {}
+
+    monkeypatch.setattr(registry, "_remote_control", remote_control)
+
+    runtime = registry.start_runtime(context, account["id"])
+    assert runtime["cdp_url"] == "http://saas-browser-runtime:9300"
+    assert runtime["status"] == "running"
+    assert calls[0] == ("POST", f"/internal/runtime/{context.tenant_id}/{account['id']}/start", {"url": "https://www.facebook.com/"})
+
+    login = asyncio.run(registry.check_login(context, account["id"]))
+    assert login["login_status"] == "logged_in"
+    assert calls[-1] == ("POST", f"/internal/runtime/{context.tenant_id}/{account['id']}/check-login", {})
+
+    stopped = registry.stop_runtime(context, account["id"])
+    assert stopped["status"] == "stopped"
+    assert calls[-1] == ("POST", f"/internal/runtime/{context.tenant_id}/{account['id']}/stop", {})
 
 
 def service_with_registry(tmp_path: Path, *, login_status: str = "logged_in", runner=None):

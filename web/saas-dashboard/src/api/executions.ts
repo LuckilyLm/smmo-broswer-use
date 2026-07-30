@@ -73,6 +73,8 @@ export interface Execution {
   error_type?: string | null;
   error_message?: string | null;
   config_snapshot?: {
+    provenance?: string;
+    demo_seed?: boolean;
     keywords?: Array<{ id?: string; keyword: string }>;
     artifacts?: {
       object_storage?: {
@@ -150,27 +152,30 @@ export function useExecution(id: string | null) {
   });
 }
 
-export function useExecutionKeywords(id: string | null) {
+export function useExecutionKeywords(id: string | null, poll = false) {
   return useQuery({
     queryKey: ["executions", id, "keywords"],
     queryFn: () => apiGet<ExecutionKeyword[]>(`/api/executions/${id}/keywords`),
     enabled: !!id,
+    refetchInterval: poll ? 3000 : false,
   });
 }
 
-export function useExecutionArtifacts(id: string | null) {
+export function useExecutionArtifacts(id: string | null, poll = false) {
   return useQuery({
     queryKey: ["executions", id, "artifacts"],
     queryFn: () => apiGet<PaginatedArtifacts>(`/api/executions/${id}/artifacts`),
     enabled: !!id,
+    refetchInterval: poll ? 3000 : false,
   });
 }
 
-export function useExecutionLogs(id: string | null, limit = 100) {
+export function useExecutionLogs(id: string | null, limit = 100, poll = false) {
   return useQuery({
     queryKey: ["executions", id, "logs", limit],
     queryFn: () => apiGet<PaginatedExecutionLogs>(`/api/executions/${id}/logs?limit=${limit}&offset=0`),
     enabled: !!id,
+    refetchInterval: poll ? 3000 : false,
   });
 }
 

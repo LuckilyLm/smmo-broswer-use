@@ -74,6 +74,8 @@ def match_comment(comment: dict[str, Any], campaign: dict[str, Any], rules: list
             return rule_result
     if _contains_any(text, _json_list(campaign.get("positive_keywords_json"))):
         return MatchResult(True, matched_rule="campaign_positive_keywords")
+    if _matches_recommendation_context(comment, text):
+        return MatchResult(True, matched_rule="recommendation_context")
     return MatchResult(False, "no_rule_match")
 
 
@@ -158,6 +160,21 @@ def _contains(text: str, needle: str) -> bool:
 
 def _contains_any(text: str, needles: list[str]) -> bool:
     return any(_contains(text, needle) for needle in needles)
+
+
+def _matches_recommendation_context(comment: dict[str, Any], text: str) -> bool:
+    keyword = str(comment.get("keyword") or "")
+    if not _contains_any(keyword, ["recommendation", "recommendations", "recommend", "looking for", "supplier", "vendor"]):
+        return False
+    value = re.sub(r"\s+", " ", text).strip()
+    if not value or len(value) > 90:
+        return False
+    lowered = value.casefold()
+    if any(token in lowered for token in ["赞回复", "查看翻译", "all reactions", "关注"]):
+        return False
+    has_letter_or_number = bool(re.search(r"[A-Za-z0-9]", value))
+    has_business_signal = bool(re.search(r"\b(cafe|food|restaurant|supplier|trading|shop|store|vendor|catering|lechon|trays|pack)\b", lowered))
+    return has_letter_or_number and (has_business_signal or len(value.split()) <= 5)
 
 
 def _matches_patterns(text: str, patterns: list[str]) -> bool:

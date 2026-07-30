@@ -1,8 +1,10 @@
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
+import { useSearchParams } from 'react-router-dom'
 import { AlertTriangle, CheckCircle, Clock, Download, ExternalLink, FileText, RefreshCw, Search, X } from 'lucide-react'
 
 import { useExecution, useExecutionArtifacts, useExecutionKeywords, useExecutionLogs, useExecutions, type Execution, type ExecutionArtifact } from '../api/executions'
 import StatusBadge from '../components/ui/StatusBadge'
+import { isDemoData } from '../utils/provenance'
 import { Button } from '../components/ui/button'
 import { Skeleton } from '../components/ui/skeleton'
 
@@ -45,9 +47,19 @@ function downloadArtifact(item?: ExecutionArtifact) {
 
 function ExecutionDrawer({ execId, onClose }: { execId: string; onClose: () => void }) {
   const { data: exec, isLoading: detailLoading } = useExecution(execId)
-  const { data: keywords = [] } = useExecutionKeywords(execId)
-  const { data: artifacts } = useExecutionArtifacts(execId)
-  const { data: logs } = useExecutionLogs(execId, 80)
+  const isActive = exec?.status === 'queued' || exec?.status === 'running'
+  const { data: keywords = [], refetch: refetchKeywords } = useExecutionKeywords(execId, isActive)
+  const { data: artifacts, refetch: refetchArtifacts } = useExecutionArtifacts(execId, isActive)
+  const { data: logs, refetch: refetchLogs } = useExecutionLogs(execId, 80, isActive)
+  const previousStatus = useRef(exec?.status)
+
+  useEffect(() => {
+    const wasActive = previousStatus.current === 'queued' || previousStatus.current === 'running'
+    if (wasActive && exec?.status && !isActive) {
+      void Promise.all([refetchKeywords(), refetchArtifacts(), refetchLogs()])
+    }
+    previousStatus.current = exec?.status
+  }, [exec?.status, isActive, refetchArtifacts, refetchKeywords, refetchLogs])
   const items = artifacts?.items || []
   const report = reportArtifact(items)
   const objectStorage = exec?.config_snapshot?.artifacts?.object_storage
@@ -56,7 +68,7 @@ function ExecutionDrawer({ execId, onClose }: { execId: string; onClose: () => v
     <div className="fixed inset-0 z-40 flex min-h-0 flex-col overflow-hidden border-l bg-white shadow-xl md:inset-y-0 md:left-auto md:right-0 md:w-[560px]" style={{ borderColor: 'var(--border)' }}>
       <div className="flex shrink-0 items-center justify-between border-b px-4 py-3" style={{ borderColor: 'var(--border)' }}>
         <div className="min-w-0">
-          <h3 className="font-semibold text-gray-900">执行详情</h3>
+          <div className="flex items-center gap-2"><h3 className="font-semibold text-gray-900">执行详情</h3>{isDemoData(exec) && <DemoBadge />}</div>
           <div className="mt-0.5 truncate font-mono text-xs text-gray-400">{execId}</div>
         </div>
         <button className="p-2 text-gray-400 hover:text-gray-600" onClick={onClose} style={{ minHeight: 44, minWidth: 44 }}>
@@ -205,9 +217,16 @@ function Info({ label, value, mono = false }: { label: string; value: string; mo
 }
 
 export default function ExecutionRecords() {
+  const [searchParams, setSearchParams] = useSearchParams()
   const [search, setSearch] = useState('')
   const [status, setStatus] = useState('')
-  const [openDrawer, setOpenDrawer] = useState<string | null>(null)
+  const openDrawer = searchParams.get('execution_id')
+  const setOpenDrawer = (executionId: string | null) => {
+    const next = new URLSearchParams(searchParams)
+    if (executionId) next.set('execution_id', executionId)
+    else next.delete('execution_id')
+    setSearchParams(next, { replace: true })
+  }
   const { data, isLoading, error, refetch, isFetching } = useExecutions({ status: status || undefined, limit: 50, offset: 0 })
   const executions = data?.items || []
 
@@ -271,7 +290,7 @@ export default function ExecutionRecords() {
                 <tbody>
                   {filtered.map((item) => (
                     <tr key={item.id} className="cursor-pointer border-b last:border-0 hover:bg-gray-50" style={{ borderColor: 'var(--border)' }} onClick={() => setOpenDrawer(item.id)}>
-                      <td className="px-3 py-3 font-mono text-xs text-gray-600">{item.id}</td>
+                      <td className="px-3 py-3 font-mono text-xs text-gray-600"><span className="flex items-center gap-1.5">{item.id}{isDemoData(item) && <DemoBadge />}</span></td>
                       <td className="px-3 py-3 text-xs text-gray-500">{item.campaign_id}</td>
                       <td className="px-3 py-3 text-xs text-gray-500">{triggerLabel(item.trigger_type)}</td>
                       <td className="px-3 py-3"><StatusBadge status={item.status} variant="dot" /></td>
@@ -305,7 +324,7 @@ export default function ExecutionRecords() {
             <button key={item.id} className="rounded-xl border bg-white p-4 text-left active:bg-gray-50" style={{ borderColor: item.status === 'failed' ? '#fca5a5' : 'var(--border)' }} onClick={() => setOpenDrawer(item.id)}>
               <div className="mb-2 flex items-start justify-between gap-2">
                 <div className="min-w-0">
-                  <div className="truncate font-mono text-xs text-gray-800">{item.id}</div>
+                  <div className="flex items-center gap-1.5"><div className="truncate font-mono text-xs text-gray-800">{item.id}</div>{isDemoData(item) && <DemoBadge />}</div>
                   <div className="mt-0.5 text-xs text-gray-400">{triggerLabel(item.trigger_type)} · {formatDateTime(item.started_at || item.created_at)}</div>
                 </div>
                 <StatusBadge status={item.status} variant="dot" />
@@ -329,6 +348,10 @@ export default function ExecutionRecords() {
       )}
     </div>
   )
+}
+
+function DemoBadge() {
+  return <span className="shrink-0 rounded border border-sky-200 bg-sky-50 px-1.5 py-0.5 font-sans text-[10px] font-medium text-sky-700">演示样本</span>
 }
 
 function Metric({ label, value }: { label: string; value: number | string }) {

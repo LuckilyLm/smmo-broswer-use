@@ -13,6 +13,8 @@ export interface ReplyRecord {
   verified?: boolean;
   error_type?: string | null;
   error_message?: string | null;
+  execution_id?: string | null;
+  provenance?: string;
   created_at: string;
   updated_at?: string;
 }

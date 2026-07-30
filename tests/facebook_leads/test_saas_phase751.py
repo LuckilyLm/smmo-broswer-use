@@ -51,7 +51,10 @@ def test_deployment_mode_validation_and_safe_runtime_capability(monkeypatch, tmp
         "runtime_host": "local",
         "runtime_available": False,
         "browser_platform": "Linux",
-        "local_browser_supported": False,
+        "local_browser_supported": True,
+        "browser_backend": "browser-use",
+        "browser_headless": True,
+        "browser_cdp_base_url": "http://127.0.0.1",
     }
     unavailable = client.post(
         f"/api/platform-accounts/{account['id']}/connect",
@@ -269,7 +272,7 @@ def test_metadata_contains_required_phase751_constraints(tmp_path):
     token_indexes = {item["name"] for item in inspector.get_indexes("token_usage")}
     assert ("execution_id", "keyword") in execution_unique
     assert "uq_token_usage_execution_keyword" in token_indexes
-    assert CURRENT_SCHEMA_REVISION == "008_reply_automation"
+    assert CURRENT_SCHEMA_REVISION == "011_nullable_reply_allowed"
 
 
 def test_saas_ci_is_secret_safe_and_excludes_real_browser():
