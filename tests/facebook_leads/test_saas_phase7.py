@@ -246,6 +246,39 @@ def test_facebook_provider_reuses_orchestrator_config_and_forces_send_disabled(t
     assert result["send_disabled"] is True
 
 
+def test_facebook_provider_preserves_configured_target_sources(tmp_path, monkeypatch):
+    allowed_url = "https://www.facebook.com/posts/allowed"
+    monkeypatch.setenv("FACEBOOK_LEADS_ALLOWED_SOURCE_URLS", allowed_url)
+    monkeypatch.setenv("FACEBOOK_LEADS_OWNED_SOURCE_IDS", "brand-page")
+    seen_configs: list[FacebookLeadsRunConfig] = []
+    provider = FacebookProvider(runner=fake_runner_factory(tmp_path, seen_configs))
+
+    asyncio.run(
+        provider.run_campaign(
+            ProviderRunRequest(
+                tenant_id="tenant",
+                campaign_id="campaign",
+                keyword="massage chair",
+                target_policy="allowlist",
+                max_contents=5,
+                max_comments=80,
+                min_confidence=0.9,
+                max_leads=5,
+                daily_limit=10,
+                llm_enabled=True,
+                history_path=str(tmp_path / "history.jsonl"),
+                runs_root=str(tmp_path / "runs"),
+            )
+        )
+    )
+
+    policy = seen_configs[0].target_policy
+    assert policy.tenant_id == "tenant"
+    assert policy.policy == "allowlist"
+    assert policy.allowed_source_urls == frozenset({allowed_url})
+    assert policy.owned_source_ids == frozenset({"brand-page"})
+
+
 def test_campaign_run_persists_execution_lead_and_token_usage(tmp_path):
     service = make_service(tmp_path, runner=fake_runner_factory(tmp_path))
     ctx, _account, campaign = create_workspace(service)

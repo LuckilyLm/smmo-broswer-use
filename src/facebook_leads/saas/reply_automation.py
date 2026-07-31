@@ -87,19 +87,63 @@ def build_candidate_key(tenant_id: str, campaign_id: str, comment: dict[str, Any
 
 def comments_from_scan_artifacts(artifacts_root: Path, tenant_id: str, execution_id: str) -> list[dict[str, Any]]:
     execution_root = artifacts_root / "tenants" / tenant_id / "executions" / execution_id / "runs"
-    comments: list[dict[str, Any]] = []
     if not execution_root.exists():
-        return comments
-    for path in sorted(execution_root.glob("*/scan_result.json")):
+        return []
+
+    comments_by_identity: dict[str, dict[str, Any]] = {}
+    for run_dir in sorted(path for path in execution_root.iterdir() if path.is_dir()):
+        path = run_dir / "lead_report_enriched.json"
+        if not path.exists():
+            path = run_dir / "lead_report.json"
+        if not path.exists():
+            continue
         try:
             payload = json.loads(path.read_text(encoding="utf-8"))
         except Exception:
             continue
         keyword = payload.get("keyword")
-        for item in payload.get("comments") or []:
-            if isinstance(item, dict):
-                comments.append({**item, "keyword": keyword})
-    return comments
+        for content in payload.get("contents") or []:
+            if not isinstance(content, dict):
+                continue
+            source_url = content.get("source_content_url") or content.get("url")
+            for lead in content.get("leads") or []:
+                if not isinstance(lead, dict) or lead.get("reply_allowed") is not True:
+                    continue
+                text = str(lead.get("comment_text") or lead.get("text") or "").strip()
+                fingerprint = lead.get("comment_fingerprint") or lead.get("fingerprint")
+                comment_id = lead.get("comment_id")
+                if not text or not (comment_id or fingerprint):
+                    continue
+                comment = {
+                    **lead,
+                    "text": text,
+                    "fingerprint": fingerprint,
+                    "source_content_url": lead.get("source_content_url") or source_url,
+                    "direct_comment_url": lead.get("direct_comment_url") or lead.get("comment_url"),
+                    "keyword": keyword,
+                }
+                identity = _comment_identity(comment)
+                current = comments_by_identity.get(identity)
+                if current is None or _comment_noise_score(comment) < _comment_noise_score(current):
+                    comments_by_identity[identity] = comment
+    return list(comments_by_identity.values())
+
+
+def _comment_identity(comment: dict[str, Any]) -> str:
+    source_url = str(comment.get("source_content_url") or "")
+    comment_id = str(comment.get("comment_id") or "")
+    if comment_id:
+        return f"id:{source_url}|{comment_id}"
+    return f"fingerprint:{comment.get('fingerprint') or comment.get('comment_fingerprint')}"
+
+
+def _comment_noise_score(comment: dict[str, Any]) -> tuple[int, int, int]:
+    text = str(comment.get("text") or comment.get("comment_text") or "").strip()
+    lowered = text.casefold()
+    noise = sum(token in lowered for token in ("赞回复", "查看翻译", "all reactions", "like reply"))
+    author = str(comment.get("author_name") or "").strip().casefold()
+    author_prefix = int(bool(author and lowered.startswith(author)))
+    return noise, author_prefix, len(text)
 
 
 def _match_rule(text: str, author: str, rule: dict[str, Any]) -> MatchResult:

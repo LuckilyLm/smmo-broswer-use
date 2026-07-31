@@ -62,6 +62,7 @@ class ProductionConfig:
     artifact_s3_public_base_url: str | None
     artifact_s3_secure: bool
     system_send_enabled: bool
+    browser_runtime_control_secret: str = "development-only-browser-runtime-control-secret"
 
     @property
     def is_production(self) -> bool:
@@ -119,6 +120,13 @@ class ProductionConfig:
         runtime_host = env.get("SAAS_RUNTIME_HOST", "local").strip().lower()
         if runtime_host not in {"local", "remote"}:
             raise RuntimeError("SAAS_RUNTIME_HOST must be local or remote")
+        browser_runtime_control_secret = env.get("SAAS_BROWSER_RUNTIME_CONTROL_SECRET", "").strip()
+        if is_production and runtime_host == "remote" and len(browser_runtime_control_secret) < 32:
+            raise RuntimeError(
+                "SAAS_BROWSER_RUNTIME_CONTROL_SECRET must be set to at least 32 characters in production remote mode"
+            )
+        if not browser_runtime_control_secret:
+            browser_runtime_control_secret = "development-only-browser-runtime-control-secret"
         browser_cdp_base_url = env.get("SAAS_BROWSER_CDP_BASE_URL", "").strip().rstrip("/")
         if not browser_cdp_base_url:
             browser_cdp_base_url = "http://127.0.0.1" if runtime_host == "local" else "http://saas-browser-runtime"
@@ -184,6 +192,7 @@ class ProductionConfig:
             artifact_s3_public_base_url=env.get("SAAS_ARTIFACT_S3_PUBLIC_BASE_URL", "").strip().rstrip("/") or None,
             artifact_s3_secure=_bool(env.get("SAAS_ARTIFACT_S3_SECURE"), default=True),
             system_send_enabled=_bool(env.get("SAAS_SYSTEM_SEND_ENABLED"), default=False),
+            browser_runtime_control_secret=browser_runtime_control_secret,
         )
 
 

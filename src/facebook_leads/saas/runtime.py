@@ -7,6 +7,7 @@ import os
 import shutil
 import socket
 import subprocess
+import tempfile
 import threading
 import time
 from pathlib import Path
@@ -47,6 +48,7 @@ class BrowserRuntimeRegistry:
         cdp_base_url: str = "http://127.0.0.1",
         cdp_bind_address: str = "127.0.0.1",
         remote_control_url: str | None = None,
+        remote_control_secret: str | None = None,
         browser_headless: bool = False,
         allow_chrome_discovery: bool = True,
     ) -> None:
@@ -60,6 +62,7 @@ class BrowserRuntimeRegistry:
         self.cdp_base_url = cdp_base_url.rstrip("/")
         self.cdp_bind_address = cdp_bind_address
         self.remote_control_url = remote_control_url.rstrip("/") if remote_control_url else None
+        self.remote_control_secret = remote_control_secret
         self.browser_headless = browser_headless
         self._sessions: dict[str, Browser] = {}
         self._browser_pids: dict[str, int] = {}
@@ -337,8 +340,9 @@ class BrowserRuntimeRegistry:
             "--remote-allow-origins=*",
         ]
         if self.chrome_executable:
-            stderr_path = Path("/tmp") / f"saas-chromium-{runtime['id']}.err"
-            stdout_path = Path("/tmp") / f"saas-chromium-{runtime['id']}.out"
+            runtime_temp_dir = Path(tempfile.gettempdir())
+            stderr_path = runtime_temp_dir / f"saas-chromium-{runtime['id']}.err"
+            stdout_path = runtime_temp_dir / f"saas-chromium-{runtime['id']}.out"
             launch_args = [
                 self.chrome_executable,
                 f"--remote-debugging-port={int(runtime['cdp_port'])}",
@@ -454,11 +458,14 @@ class BrowserRuntimeRegistry:
         if not self.remote_control_url:
             raise BrowserRuntimeError("runtime_control_unavailable", "browser runtime control URL is not configured")
         data = json.dumps(payload).encode("utf-8")
+        headers = {"Content-Type": "application/json"}
+        if self.remote_control_secret:
+            headers["Authorization"] = f"Bearer {self.remote_control_secret}"
         request = Request(
             f"{self.remote_control_url}{path}",
             data=data,
             method=method,
-            headers={"Content-Type": "application/json"},
+            headers=headers,
         )
         try:
             with urlopen(request, timeout=30) as response:

@@ -298,6 +298,39 @@ def test_extract_comments_parses_missing_fields_without_crashing_and_dedupes():
     assert comments[1].is_reply is True
 
 
+def test_extract_comments_dedupes_comment_id_and_prefers_clean_text():
+    page = FakePage(
+        comment_records=[
+            {
+                "comment_id": "c1",
+                "author_name": "Buyer",
+                "author_url": None,
+                "text": "Buyer · 2wHow much?赞回复查看翻译",
+                "timestamp_text": None,
+                "comment_url": "https://www.facebook.com/posts/1?comment_id=c1",
+                "is_reply": False,
+                "parent_comment_id": None,
+            },
+            {
+                "comment_id": "c1",
+                "author_name": "Buyer",
+                "author_url": None,
+                "text": "How much?",
+                "timestamp_text": None,
+                "comment_url": "https://www.facebook.com/posts/1?comment_id=c1",
+                "is_reply": False,
+                "parent_comment_id": None,
+            },
+        ]
+    )
+
+    comments = asyncio.run(extract_comments(page, "https://www.facebook.com/posts/1"))
+
+    assert len(comments) == 1
+    assert comments[0].comment_id == "c1"
+    assert comments[0].text == "How much?"
+
+
 def test_extract_comment_author_keeps_username_profile_link():
     author = extract_comment_author(
         CommentRecord(

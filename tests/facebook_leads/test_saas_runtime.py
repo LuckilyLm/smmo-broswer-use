@@ -17,6 +17,7 @@ from src.facebook_leads.saas.api import create_app
 from src.facebook_leads.saas.models import TenantContext
 from src.facebook_leads.saas.providers import FacebookProvider
 from src.facebook_leads.saas.runtime import BrowserRuntimeRegistry
+from urllib.request import Request
 from src.facebook_leads.saas.service import SaaSService
 from src.facebook_leads.saas.storage import SaaSStorage
 from src.facebook_leads.saas.worker import ExecutionWorker
@@ -139,6 +140,37 @@ def test_runtime_retries_cdp_port_unique_collision(tmp_path, monkeypatch):
 
     assert runtime["cdp_port"] == 9401
     assert calls == 1
+
+
+def test_remote_control_sends_bearer_secret(tmp_path, monkeypatch):
+    registry = BrowserRuntimeRegistry(
+        SaaSStorage(tmp_path / "remote-auth.sqlite"),
+        runtime_host="remote",
+        remote_control_url="http://saas-browser-runtime:8001",
+        remote_control_secret="shared-runtime-secret",
+        allow_chrome_discovery=False,
+    )
+    captured: list[Request] = []
+
+    class Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self):
+            return b"{}"
+
+    def fake_urlopen(request: Request, timeout: int):
+        captured.append(request)
+        assert timeout == 30
+        return Response()
+
+    monkeypatch.setattr(runtime_module, "urlopen", fake_urlopen)
+
+    assert registry._remote_control("POST", "/internal/runtime/tenant/account/stop", {}) == {}
+    assert captured[0].get_header("Authorization") == "Bearer shared-runtime-secret"
 
 
 def test_remote_runtime_registers_service_cdp_and_delegates_controls(tmp_path, monkeypatch):

@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Any, Awaitable, Callable
 
 from src.facebook_leads.facebook.orchestrator import FacebookLeadsRunConfig, run_facebook_leads_job
-from src.facebook_leads.facebook.target_policy import build_target_policy_config
+from src.facebook_leads.facebook.target_policy import build_target_policy_config, target_policy_from_env
 
 
 @dataclass(frozen=True)
@@ -71,6 +71,7 @@ class FacebookProvider(BasePlatformProvider):
         self.runner = runner or run_facebook_leads_job
 
     async def run_campaign(self, request: ProviderRunRequest) -> dict[str, Any]:
+        configured_sources = target_policy_from_env()
         config = FacebookLeadsRunConfig(
             cdp_url=request.run_context.cdp_url if request.run_context else None,
             keyword=request.keyword,
@@ -82,7 +83,12 @@ class FacebookProvider(BasePlatformProvider):
             daily_limit=request.daily_limit,
             history_path=request.history_path,
             runs_root=request.runs_root,
-            target_policy=build_target_policy_config(policy=request.target_policy),
+            target_policy=build_target_policy_config(
+                tenant_id=request.tenant_id,
+                policy=request.target_policy,
+                owned_source_ids=configured_sources.owned_source_ids,
+                allowed_source_urls=configured_sources.allowed_source_urls,
+            ),
             custom_positive_keywords=request.custom_positive_keywords,
         )
         result = await self.runner(config)

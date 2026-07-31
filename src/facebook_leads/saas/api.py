@@ -113,6 +113,7 @@ def create_app(*, database_url: str | None = None, service: SaaSService | None =
             cdp_base_url=config.browser_cdp_base_url,
             cdp_bind_address=config.browser_cdp_bind_address,
             remote_control_url=config.browser_runtime_control_url,
+            remote_control_secret=config.browser_runtime_control_secret,
             browser_headless=config.browser_headless,
             allow_chrome_discovery=True,
         )
@@ -423,19 +424,34 @@ def create_app(*, database_url: str | None = None, service: SaaSService | None =
         return svc.me(context)
 
     @auth_router.get("/api/auth/sessions")
-    def auth_sessions(context: TenantContext = Depends(require_context), svc: SaaSService = Depends(get_service)) -> dict[str, Any]:
-        items = svc.storage.list("sessions", filters={"user_id": context.user_id}, limit=200)
-        for item in items:
-            item["current"] = item.get("tenant_id") == context.tenant_id and not item.get("revoked_at")
-        active = [item for item in items if not item.get("revoked_at")]
-        return {"items": active, "limit": 200, "offset": 0, "total": len(active)}
+    def auth_sessions(
+        authorization: str = Header(default=""),
+        session_cookie: str = Cookie(default="", alias=SESSION_COOKIE),
+        context: TenantContext = Depends(require_context),
+        svc: SaaSService = Depends(get_service),
+    ) -> dict[str, Any]:
+        current_token = _session_token(authorization, session_cookie, config.session_secret)
+        rows = svc.storage.list(
+            "sessions",
+            filters={"user_id": context.user_id, "revoked_at": None},
+            limit=200,
+        )
+        items = [_public_session(row, current_token=current_token) for row in rows]
+        return {"items": items, "limit": 200, "offset": 0, "total": len(items)}
 
     @auth_router.delete("/api/auth/sessions/{session_id}", status_code=204)
     def revoke_session(session_id: str, context: TenantContext = Depends(require_context), svc: SaaSService = Depends(get_service)) -> Response:
-        row = svc.storage.get_by_id("sessions", session_id)
-        if not row or row.get("user_id") != context.user_id:
+        row = next(
+            (
+                candidate
+                for candidate in svc.storage.list("sessions", filters={"user_id": context.user_id}, limit=1000)
+                if hmac.compare_digest(_public_session_id(candidate["id"]), session_id)
+            ),
+            None,
+        )
+        if not row:
             raise HTTPException(status_code=404, detail="not found")
-        svc.storage.update_by_id("sessions", session_id, {"revoked_at": utc_now()})
+        svc.storage.update_by_id("sessions", row["id"], {"revoked_at": utc_now()})
         return Response(status_code=204)
 
     @auth_router.post("/api/auth/sessions/revoke-others")
@@ -1508,7 +1524,11 @@ def create_app(*, database_url: str | None = None, service: SaaSService | None =
             "SELECT id, tenant_id, expires_at, last_seen_at, revoked_at, created_at FROM sessions WHERE user_id = ? ORDER BY created_at DESC LIMIT ?",
             [user_id, 20],
         )
-        return {"user": _public_api_user(user), "memberships": memberships, "sessions": sessions}
+        return {
+            "user": _public_api_user(user),
+            "memberships": memberships,
+            "sessions": [_public_admin_session(session) for session in sessions],
+        }
 
     @app.get("/api/admin/system/health")
     def admin_system_health(context: TenantContext = Depends(require_context), svc: SaaSService = Depends(get_service)) -> dict[str, Any]:
@@ -1597,6 +1617,37 @@ def _csv_cell(value: Any) -> str:
     text = "" if value is None else str(value)
     escaped = text.replace('"', '""')
     return f'"{escaped}"' if any(ch in escaped for ch in [",", "\n", '"']) else escaped
+
+
+def _public_session_id(raw_token: str) -> str:
+    digest = hashlib.sha256(b"leadflow:session-public-id:v1\x00" + raw_token.encode("utf-8")).hexdigest()
+    return f"session_{digest}"
+
+
+def _public_session_metadata(session: dict[str, Any]) -> dict[str, Any]:
+    raw_token = str(session["id"])
+    return {
+        "id": _public_session_id(raw_token),
+        "tenant_id": session.get("tenant_id"),
+        "created_at": session.get("created_at"),
+        "last_seen_at": session.get("last_seen_at"),
+        "expires_at": session.get("expires_at"),
+    }
+
+
+def _public_session(session: dict[str, Any], *, current_token: str) -> dict[str, Any]:
+    raw_token = str(session["id"])
+    return {
+        **_public_session_metadata(session),
+        "current": bool(current_token) and hmac.compare_digest(raw_token, current_token),
+    }
+
+
+def _public_admin_session(session: dict[str, Any]) -> dict[str, Any]:
+    return {
+        **_public_session_metadata(session),
+        "revoked_at": session.get("revoked_at"),
+    }
 
 
 def _public_api_user(user: dict[str, Any]) -> dict[str, Any]:

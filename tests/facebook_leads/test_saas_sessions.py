@@ -99,12 +99,102 @@ def test_login_cookie_max_age_matches_session_ttl(tmp_path):
     assert "Max-Age=604800" in response.headers["set-cookie"]
 
 
-def test_request_validation_error_includes_field_errors(tmp_path):
-    service, _tenant, _user, _login = _session_workspace(tmp_path)
+def test_session_list_uses_public_ids_safe_metadata_and_exact_current_token(tmp_path):
+    service, tenant, _user, login = _session_workspace(tmp_path)
+    other = service.login("session@example.com", "pass123456")
     client = TestClient(create_app(service=service))
 
-    response = client.post("/api/auth/login", json={"email": "session@example.com"})
+    response = client.get(
+        "/api/auth/sessions",
+        headers={"Authorization": f"Bearer {login['access_token']}"},
+    )
 
-    assert response.status_code == 422
-    assert response.json()["error"]["code"] == "invalid_request"
-    assert {"field": "password", "message": "Field required"} in response.json()["error"]["fields"]
+    assert response.status_code == 200
+    items = response.json()["items"]
+    assert len(items) == 2
+    assert {tuple(sorted(item)) for item in items} == {
+        ("created_at", "current", "expires_at", "id", "last_seen_at", "tenant_id")
+    }
+    assert login["access_token"] not in response.text
+    assert other["access_token"] not in response.text
+    assert all(item["id"].startswith("session_") for item in items)
+    assert all(item["tenant_id"] == tenant["id"] for item in items)
+    assert sum(item["current"] for item in items) == 1
+
+    repeated = client.get(
+        "/api/auth/sessions",
+        headers={"Authorization": f"Bearer {login['access_token']}"},
+    ).json()["items"]
+    assert {item["id"] for item in repeated} == {item["id"] for item in items}
+
+
+def test_admin_user_detail_uses_public_session_ids_and_safe_metadata(tmp_path):
+    service, tenant, user, login = _session_workspace(tmp_path)
+    other = service.login("session@example.com", "pass123456")
+    service.storage.update_by_id("users", user["id"], {"is_system_admin": True})
+    client = TestClient(create_app(service=service))
+
+    response = client.get(
+        f"/api/admin/users/{user['id']}",
+        headers={"Authorization": f"Bearer {login['access_token']}"},
+    )
+
+    assert response.status_code == 200
+    sessions = response.json()["sessions"]
+    assert len(sessions) == 2
+    assert {tuple(sorted(item)) for item in sessions} == {
+        ("created_at", "expires_at", "id", "last_seen_at", "revoked_at", "tenant_id")
+    }
+    assert login["access_token"] not in response.text
+    assert other["access_token"] not in response.text
+    assert all(item["id"].startswith("session_") for item in sessions)
+    assert all(item["tenant_id"] == tenant["id"] for item in sessions)
+
+
+def test_revoke_session_resolves_public_id_and_cross_user_is_not_found(tmp_path):
+    service, _tenant, _user, login = _session_workspace(tmp_path)
+    second = service.login("session@example.com", "pass123456")
+    stranger = service.create_user("stranger@example.com", "pass123456", "Stranger")
+    stranger_tenant = service.create_tenant("Stranger", "stranger")
+    service.add_user_to_tenant(stranger_tenant["id"], stranger["id"], role="admin")
+    stranger_login = service.login("stranger@example.com", "pass123456")
+    client = TestClient(create_app(service=service))
+    headers = {"Authorization": f"Bearer {login['access_token']}"}
+
+    listed = client.get("/api/auth/sessions", headers=headers).json()["items"]
+    second_public_id = next(item["id"] for item in listed if not item["current"])
+    revoked = client.delete(f"/api/auth/sessions/{second_public_id}", headers=headers)
+
+    assert revoked.status_code == 204
+    assert service.storage.get_by_id("sessions", second["access_token"])["revoked_at"] is not None
+
+    stranger_items = client.get(
+        "/api/auth/sessions",
+        headers={"Authorization": f"Bearer {stranger_login['access_token']}"},
+    ).json()["items"]
+    forbidden = client.delete(f"/api/auth/sessions/{stranger_items[0]['id']}", headers=headers)
+    raw_token_attempt = client.delete(f"/api/auth/sessions/{stranger_login['access_token']}", headers=headers)
+    assert forbidden.status_code == 404
+    assert raw_token_attempt.status_code == 404
+    assert service.storage.get_by_id("sessions", stranger_login["access_token"])["revoked_at"] is None
+
+
+def test_storage_none_filters_null_and_empty_string_is_ignored(tmp_path):
+    storage = SaaSStorage(tmp_path / "null-filter.sqlite")
+    tenant = storage.insert("tenants", {"name": "Filters", "slug": "filters", "status": "active"})
+    storage.insert(
+        "notifications",
+        {"tenant_id": tenant["id"], "user_id": None, "type": "shared", "severity": "info", "title": "Shared", "message": "shared"},
+    )
+    storage.insert(
+        "notifications",
+        {"tenant_id": tenant["id"], "user_id": "user_1", "type": "private", "severity": "info", "title": "Private", "message": "private"},
+    )
+
+    null_rows = storage.list("notifications", tenant_id=tenant["id"], filters={"user_id": None})
+    ignored_rows = storage.list("notifications", tenant_id=tenant["id"], filters={"user_id": ""})
+
+    assert [row["title"] for row in null_rows] == ["Shared"]
+    assert {row["title"] for row in ignored_rows} == {"Shared", "Private"}
+    assert storage.count("notifications", tenant_id=tenant["id"], filters={"user_id": None}) == 1
+    assert storage.count("notifications", tenant_id=tenant["id"], filters={"user_id": ""}) == 2

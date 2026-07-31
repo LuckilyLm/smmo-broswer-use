@@ -23,6 +23,7 @@ PRODUCTION_ENV = {
     "SESSION_SECRET": "production-secret-that-is-at-least-32-characters",
     "SAAS_ALLOWED_ORIGINS": "https://leads.example.com",
     "DATABASE_URL": "postgresql+psycopg://saas:secret@localhost:5432/saas",
+    "SAAS_BROWSER_RUNTIME_CONTROL_SECRET": "production-runtime-control-secret-at-least-32-characters",
 }
 
 
@@ -155,6 +156,51 @@ def test_production_config_requires_session_secret(monkeypatch):
 
     with pytest.raises(RuntimeError, match="SESSION_SECRET"):
         ProductionConfig.from_env()
+
+
+def test_production_remote_runtime_requires_strong_control_secret():
+    with pytest.raises(RuntimeError, match="SAAS_BROWSER_RUNTIME_CONTROL_SECRET"):
+        ProductionConfig.from_env(
+            {
+                **PRODUCTION_ENV,
+                "SAAS_RUNTIME_HOST": "remote",
+                "SAAS_BROWSER_RUNTIME_CONTROL_SECRET": "too-short",
+            }
+        )
+
+
+def test_development_runtime_control_secret_has_explicit_fallback():
+    config = ProductionConfig.from_env({})
+
+    assert config.browser_runtime_control_secret == "development-only-browser-runtime-control-secret"
+
+
+def test_browser_runtime_control_health_is_public_and_internal_operations_require_bearer(tmp_path, monkeypatch):
+    monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path / 'module-runtime-control.sqlite'}")
+    from src.facebook_leads.saas.browser_runtime_api import create_app as create_browser_runtime_app
+
+    database_url = f"sqlite:///{tmp_path / 'runtime-control.sqlite'}"
+    SaaSStorage(database_url)
+    config = ProductionConfig.from_env(
+        {
+            "DATABASE_URL": database_url,
+            "SAAS_BROWSER_RUNTIME_CONTROL_SECRET": "test-runtime-control-secret-at-least-32-characters",
+        }
+    )
+    client = TestClient(create_browser_runtime_app(config=config))
+
+    assert client.get("/health").status_code == 200
+    path = "/internal/runtime/tenant/account/stop"
+    missing = client.post(path)
+    incorrect = client.post(path, headers={"Authorization": "Bearer incorrect"})
+    authenticated = client.post(
+        path,
+        headers={"Authorization": f"Bearer {config.browser_runtime_control_secret}"},
+    )
+
+    assert missing.status_code == 401
+    assert incorrect.status_code == 401
+    assert authenticated.status_code != 401
 
 
 def test_production_config_rejects_cors_wildcard_with_credentials(monkeypatch):

@@ -12,7 +12,7 @@ from sqlalchemy import inspect
 
 from scripts.saas_cleanup_sessions import cleanup_sessions
 from src.facebook_leads.saas.artifacts import atomic_write_json, load_json_safe, safe_artifact_path
-from src.facebook_leads.saas.auth import hash_password, needs_rehash
+from src.facebook_leads.saas.auth import MAX_PBKDF2_ITERATIONS, hash_password, needs_rehash, verify_password
 from src.facebook_leads.saas.api import create_app
 from src.facebook_leads.saas.config import ProductionConfig
 from src.facebook_leads.saas.db import utc_now
@@ -94,10 +94,52 @@ def test_legacy_password_hash_upgrades_after_login(tmp_path):
     service, context = make_service(tmp_path)
     legacy = hash_password("pass123456", iterations=120_000)
     service.storage.update_by_id("users", context.user_id, {"password_hash": legacy})
+    assert verify_password("pass123456", legacy)
     assert needs_rehash(legacy)
     service.login("owner@example.com", "pass123456")
     upgraded = service.storage.get_by_id("users", context.user_id)["password_hash"]
     assert not needs_rehash(upgraded)
+
+
+@pytest.mark.parametrize(
+    "malformed_hash",
+    [
+        None,
+        123,
+        "",
+        "pbkdf2_sha256$310000$salt",
+        "pbkdf2_sha256$310000$salt$digest$extra",
+        "unknown$310000$00$" + "00" * 32,
+        "pbkdf2_sha256$nope$00$" + "00" * 32,
+        "pbkdf2_sha256$1.5$00$" + "00" * 32,
+        "pbkdf2_sha256$-1$00$" + "00" * 32,
+        "pbkdf2_sha256$0$00$" + "00" * 32,
+        f"pbkdf2_sha256${MAX_PBKDF2_ITERATIONS + 1}$00$" + "00" * 32,
+        "pbkdf2_sha256$999999999999999999999999999999999999$00$" + "00" * 32,
+        "pbkdf2_sha256$1$zz$" + "00" * 32,
+        "pbkdf2_sha256$1$00$zz",
+        "pbkdf2_sha256$1$$" + "00" * 32,
+        "pbkdf2_sha256$1$00$00",
+    ],
+)
+def test_malformed_password_hashes_fail_closed(malformed_hash):
+    assert verify_password("pass123456", malformed_hash) is False
+    assert needs_rehash(malformed_hash) is True
+
+
+def test_api_login_with_malformed_password_hash_returns_invalid_credentials(tmp_path):
+    service, context = make_service(tmp_path)
+    service.storage.update_by_id(
+        "users",
+        context.user_id,
+        {"password_hash": f"pbkdf2_sha256${MAX_PBKDF2_ITERATIONS + 1}$00$" + "00" * 32},
+    )
+    response = TestClient(create_app(service=service)).post(
+        "/api/auth/login",
+        json={"email": "owner@example.com", "password": "pass123456"},
+    )
+    assert response.status_code == 401
+    assert response.json()["error"]["message"] == "invalid credentials"
 
 
 def test_scheduler_trigger_unique_constraint_is_final_duplicate_defense(tmp_path):

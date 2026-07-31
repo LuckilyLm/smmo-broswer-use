@@ -871,7 +871,7 @@ class SaaSService:
 
     def list_reply_candidates(self, context: TenantContext, filters: dict[str, Any] | None = None, *, limit: int = 100, offset: int = 0) -> dict[str, Any]:
         allowed = {"campaign_id", "execution_id", "reply_plan_id", "status"}
-        safe_filters = {key: value for key, value in (filters or {}).items() if key in allowed}
+        safe_filters = {key: value for key, value in (filters or {}).items() if key in allowed and value not in (None, "")}
         rows = self.storage.list("reply_candidates", tenant_id=context.tenant_id, filters=safe_filters, limit=_safe_limit(limit), offset=offset)
         total = self.storage.count("reply_candidates", tenant_id=context.tenant_id, filters=safe_filters)
         return {"items": self._with_execution_provenance(context, rows), "limit": _safe_limit(limit), "offset": offset, "total": total}
@@ -935,7 +935,7 @@ class SaaSService:
 
     def list_reply_plans(self, context: TenantContext, filters: dict[str, Any] | None = None, *, limit: int = 100, offset: int = 0) -> dict[str, Any]:
         allowed = {"campaign_id", "execution_id", "status"}
-        safe_filters = {key: value for key, value in (filters or {}).items() if key in allowed}
+        safe_filters = {key: value for key, value in (filters or {}).items() if key in allowed and value not in (None, "")}
         rows = self.storage.list("reply_plans", tenant_id=context.tenant_id, filters=safe_filters, limit=_safe_limit(limit), offset=offset)
         total = self.storage.count("reply_plans", tenant_id=context.tenant_id, filters=safe_filters)
         return {"items": self._with_execution_provenance(context, rows), "limit": _safe_limit(limit), "offset": offset, "total": total}

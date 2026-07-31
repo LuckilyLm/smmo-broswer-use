@@ -153,12 +153,12 @@ class SaaSStorage:
         if tenant_id is not None and "tenant_id" in db_table.c:
             criteria.append(db_table.c.tenant_id == tenant_id)
         for key, value in (filters or {}).items():
-            if value is None or value == "":
+            if value == "":
                 continue
             if key == "keyword" and table == "leads":
                 criteria.append(or_(db_table.c.comment_text.ilike(f"%{value}%"), db_table.c.author_name.ilike(f"%{value}%")))
             elif key in db_table.c:
-                criteria.append(db_table.c[key] == value)
+                criteria.append(db_table.c[key].is_(None) if value is None else db_table.c[key] == value)
         stmt = select(db_table)
         if criteria:
             stmt = stmt.where(and_(*criteria))
@@ -569,8 +569,10 @@ def _criteria(db_table, *, tenant_id: str | None = None, filters: dict[str, Any]
     if tenant_id is not None and "tenant_id" in db_table.c:
         criteria.append(db_table.c.tenant_id == tenant_id)
     for key, value in (filters or {}).items():
-        if value is not None and key in db_table.c:
-            criteria.append(db_table.c[key] == value)
+        if value == "":
+            continue
+        if key in db_table.c:
+            criteria.append(db_table.c[key].is_(None) if value is None else db_table.c[key] == value)
     return criteria
 
 

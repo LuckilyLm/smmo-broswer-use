@@ -271,6 +271,50 @@ def test_reply_candidate_api_requires_reason_and_supports_bulk_actions(service: 
     assert approved.json()["updated"] == 1
 
 
+def test_reply_list_apis_ignore_omitted_optional_filters(service: SaaSService, ctx: TenantContext, campaign: dict):
+    template = service.create_reply_template(ctx, {"name": "WhatsApp", "content": "My WhatsApp is {{whatsapp}}", "is_default": True})
+    service.create_reply_match_rule(ctx, {"campaign_id": campaign["id"], "reply_template_id": template["id"], "name": "Contact", "contains_any_json": ["contact"]})
+    execution = _execution(service, ctx, campaign)
+    _scan_artifact(service, ctx, execution["id"], [{"comment_id": "c1", "author_name": "Buyer", "text": "Can I contact you?", "fingerprint": "fp1"}])
+    service.generate_reply_plan_for_execution(ctx, execution["id"])
+    client = TestClient(create_app(service=service))
+    token = service.login("owner@example.com", "password123")["access_token"]
+    headers = {"Authorization": f"Bearer {token}"}
+
+    plans = client.get("/api/reply-plans", headers=headers, params={"status": "pending_approval"})
+    candidates = client.get("/api/reply-candidates", headers=headers, params={"status": "pending_approval"})
+
+    assert plans.status_code == 200
+    assert plans.json()["total"] == 1
+    assert candidates.status_code == 200
+    assert candidates.json()["total"] == 1
+
+
+def test_reply_plan_uses_only_allowed_deduplicated_report_leads(service: SaaSService, ctx: TenantContext, campaign: dict):
+    template = service.create_reply_template(ctx, {"name": "WhatsApp", "content": "My WhatsApp is {{whatsapp}}", "is_default": True})
+    service.create_reply_match_rule(ctx, {"campaign_id": campaign["id"], "reply_template_id": template["id"], "name": "Price", "contains_any_json": ["how much"]})
+    execution = _execution(service, ctx, campaign)
+    _scan_artifact(
+        service,
+        ctx,
+        execution["id"],
+        [
+            {"comment_id": "c1", "author_name": "Buyer", "text": "How much?", "fingerprint": "fp-clean", "reply_allowed": True},
+            {"comment_id": "c1", "author_name": "Buyer", "text": "Buyer 2w How much? Like Reply", "fingerprint": "fp-noisy", "reply_allowed": True},
+            {"comment_id": "c2", "author_name": "Other", "text": "How much?", "fingerprint": "fp-blocked", "reply_allowed": False},
+            {"comment_id": "post-body", "text": "Portable power station supplier", "fingerprint": "fp-post", "reply_allowed": False},
+        ],
+    )
+
+    plan = service.generate_reply_plan_for_execution(ctx, execution["id"])
+    candidates = service.list_reply_candidates(ctx)["items"]
+
+    assert plan and plan["total_candidates"] == 1
+    assert len(candidates) == 1
+    assert candidates[0]["comment_id"] == "c1"
+    assert candidates[0]["comment_text"] == "How much?"
+
+
 def test_disabled_campaign_and_no_template_do_not_create_sendable_candidate(service: SaaSService, ctx: TenantContext, campaign: dict):
     disabled = service.update_campaign(ctx, campaign["id"], {"reply_mode": "disabled"}) or campaign
     execution = _execution(service, ctx, disabled)
@@ -379,4 +423,22 @@ def _execution(service: SaaSService, ctx: TenantContext, campaign: dict) -> dict
 def _scan_artifact(service: SaaSService, ctx: TenantContext, execution_id: str, comments: list[dict]) -> None:
     path = Path(service.artifacts_root) / "tenants" / ctx.tenant_id / "executions" / execution_id / "runs" / "run_test"
     path.mkdir(parents=True, exist_ok=True)
-    (path / "scan_result.json").write_text(json.dumps({"keyword": "massage chair", "comments": comments}), encoding="utf-8")
+    leads = [
+        {
+            **comment,
+            "comment_text": comment.get("comment_text") or comment.get("text"),
+            "comment_fingerprint": comment.get("comment_fingerprint") or comment.get("fingerprint"),
+            "source_content_url": comment.get("source_content_url") or "https://facebook.example/posts/1",
+            "reply_allowed": comment.get("reply_allowed", True),
+        }
+        for comment in comments
+    ]
+    (path / "lead_report_enriched.json").write_text(
+        json.dumps(
+            {
+                "keyword": "massage chair",
+                "contents": [{"source_content_url": "https://facebook.example/posts/1", "leads": leads}],
+            }
+        ),
+        encoding="utf-8",
+    )

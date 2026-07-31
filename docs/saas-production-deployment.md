@@ -19,7 +19,7 @@ The browser profile root must be persistent storage, normally `/data/browser_pro
 
 ## Prerequisites and environment
 
-Copy `.env.production.example` to a secret-managed `.env.production`. Set a strong PostgreSQL password, an explicit `SAAS_DATABASE_URL` using the Docker `postgres` host, and a stable `SESSION_SECRET` of at least 32 characters. Set exact `SAAS_ALLOWED_ORIGINS`; wildcard CORS with credentials is rejected. Production cookies default to `Secure=true`.
+Copy `.env.production.example` to a secret-managed `.env.production`. Set a strong PostgreSQL password, an explicit `SAAS_DATABASE_URL` using the Docker `postgres` host, a stable `SESSION_SECRET` of at least 32 characters, and a separate random `SAAS_BROWSER_RUNTIME_CONTROL_SECRET` of at least 32 characters. The control secret is shared only by the API, worker, and Browser Runtime containers: all `/internal/runtime/*` operations require it as a Bearer token, while the Browser Runtime `/health` endpoint remains unauthenticated for container health checks. Production remote-runtime configuration fails fast if this secret is missing or too short. Set exact `SAAS_ALLOWED_ORIGINS`; wildcard CORS with credentials is rejected. Production cookies default to `Secure=true`.
 
 The API uses one Uvicorn worker because login rate limiting and runtime coordination retain process-local state. PostgreSQL queue and runtime locks are database-backed, but rate limits are not shared across API replicas. Introduce a shared limiter before scaling API instances.
 
@@ -30,6 +30,8 @@ Campaigns use rules-only detection unless the campaign has `llm_enabled=true` an
 - `SAAS_LLM_ENDPOINT`: OpenAI-compatible base URL, for example `https://api.openai.com/v1`.
 - `OPENAI_API_KEY`: API key.
 - `SAAS_LLM_MODEL`: model name, also exported to the Facebook leads runner as `FACEBOOK_LEADS_LLM_MODEL`.
+
+Campaign target authorization is explicit. `discovery_only` always blocks reply candidates. For `owned_only`, set `FACEBOOK_LEADS_OWNED_SOURCE_IDS` to a comma-separated list of owned Facebook page/source identifiers. For `allowlist`, set `FACEBOOK_LEADS_ALLOWED_SOURCE_URLS` to a comma-separated list of approved Facebook source URLs. Compose passes both values to the API and worker; an empty list grants no reply permission.
 
 For remote MinIO or S3-compatible artifact storage, set:
 

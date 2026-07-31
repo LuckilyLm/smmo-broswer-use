@@ -132,7 +132,8 @@ async def extract_comments(
         root = (await find_comment_root(page)).root
     records = await _extract_comment_records(root)
     comments: list[FacebookComment] = []
-    seen: set[str] = set()
+    seen_fingerprints: set[str] = set()
+    comment_indexes: dict[str, int] = {}
     for record in records:
         raw_text = _clean_text(record.text)
         timestamp = _clean_text(record.timestamp_text)
@@ -154,29 +155,46 @@ async def extract_comments(
             comment_id_source=record.comment_id_source,
         )
         fingerprint = make_comment_fingerprint(source_content_url, author, text, timestamp)
-        if fingerprint in seen:
+        comment_id = link_resolution.comment_id
+        if not comment_id and fingerprint in seen_fingerprints:
             continue
-        seen.add(fingerprint)
-        comments.append(
-            FacebookComment(
-                comment_id=link_resolution.comment_id,
-                author_name=author,
-                author_url=record.author_url,
-                text=text,
-                timestamp_text=timestamp,
-                comment_url=link_resolution.comment_url,
-                is_reply=record.is_reply,
-                parent_comment_id=record.parent_comment_id,
-                source_content_url=source_content_url,
-                fingerprint=fingerprint,
-                direct_comment_url=link_resolution.direct_comment_url,
-                comment_id_source=link_resolution.comment_id_source,
-                author_extract_strategy=author_info.strategy,
-            )
+        comment = FacebookComment(
+            comment_id=comment_id,
+            author_name=author,
+            author_url=record.author_url,
+            text=text,
+            timestamp_text=timestamp,
+            comment_url=link_resolution.comment_url,
+            is_reply=record.is_reply,
+            parent_comment_id=record.parent_comment_id,
+            source_content_url=source_content_url,
+            fingerprint=fingerprint,
+            direct_comment_url=link_resolution.direct_comment_url,
+            comment_id_source=link_resolution.comment_id_source,
+            author_extract_strategy=author_info.strategy,
         )
+        if comment_id and comment_id in comment_indexes:
+            index = comment_indexes[comment_id]
+            if _comment_noise_score(comment) < _comment_noise_score(comments[index]):
+                comments[index] = comment
+            continue
         if len(comments) >= limit:
-            break
+            continue
+        if comment_id:
+            comment_indexes[comment_id] = len(comments)
+        else:
+            seen_fingerprints.add(fingerprint)
+        comments.append(comment)
     return comments
+
+
+def _comment_noise_score(comment: FacebookComment) -> tuple[int, int, int]:
+    text = str(comment.text or "").strip()
+    lowered = text.casefold()
+    author = str(comment.author_name or "").strip().casefold()
+    author_prefix = int(bool(author and lowered.startswith(author)))
+    ui_noise = sum(token in lowered for token in ("like reply", "see translation", "all reactions"))
+    return author_prefix, ui_noise, len(text)
 
 
 async def find_comment_root(page) -> CommentRoot:
