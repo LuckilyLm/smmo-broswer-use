@@ -11,15 +11,16 @@ interface MetricCardProps {
   sparkline?: number[]
 }
 
+const accentColors = {
+  default: { icon: '#6366f1', bg: '#eef2ff' },
+  warning: { icon: '#f59e0b', bg: '#fffbeb' },
+  success: { icon: '#10b981', bg: '#ecfdf5' },
+  danger: { icon: '#ef4444', bg: '#fef2f2' },
+}
+
 export default function MetricCard({
   label, value, change, changeLabel, tooltip, icon, accent = 'default', sparkline
 }: MetricCardProps) {
-  const accentColors = {
-    default: { icon: '#6366f1', bg: '#eef2ff' },
-    warning: { icon: '#f59e0b', bg: '#fffbeb' },
-    success: { icon: '#10b981', bg: '#ecfdf5' },
-    danger: { icon: '#ef4444', bg: '#fef2f2' },
-  }
   const color = accentColors[accent]
 
   const maxVal = sparkline ? Math.max(...sparkline, 1) : 1
@@ -42,7 +43,7 @@ export default function MetricCard({
       <div className="flex items-end gap-3">
         <div className="whitespace-nowrap text-2xl font-bold leading-none text-foreground">{value}</div>
         {sparkline && sparkline.length > 1 && (
-          <svg width={48} height={24} className="mb-0.5">
+          <svg width={48} height={24} className="mb-0.5" role="img" aria-label={`${label}趋势图`}>
             <polyline
               points={sparkline.map((v, i) => {
                 const x = (i / (sparkline.length - 1)) * 48

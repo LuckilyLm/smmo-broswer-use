@@ -432,7 +432,7 @@ async def _extract_comment_records(page) -> list[CommentRecord]:
     script = """
     () => {
       const articleNodes = Array.from(document.querySelectorAll('[role="article"], [aria-label*="comment" i]'));
-      const isCommentHref = (href) => /comment_id=|reply_comment_id=|story_fbid=|permalink\\.php/i.test(href || '');
+      const isCommentHref = (href) => /comment_id=|reply_comment_id=|comment_id_to_reply=|story_fbid=|permalink\\.php/i.test(href || '');
       const isFacebookHref = (href) => {
         try {
           const url = new URL(href, window.location.href);

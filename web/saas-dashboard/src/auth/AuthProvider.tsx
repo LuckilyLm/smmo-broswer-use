@@ -1,4 +1,12 @@
-import { createContext, useContext, useState, useEffect, useCallback, type ReactNode } from "react";
+import {
+  createContext,
+  useCallback,
+  useContext,
+  useEffect,
+  useMemo,
+  useReducer,
+  type ReactNode,
+} from "react";
 import { apiGet, apiPost } from "../api/client";
 
 export type UserRole = "owner" | "admin" | "member" | "viewer";
@@ -41,6 +49,58 @@ interface AuthContextValue {
   hasPermission: (permission: string) => boolean;
 }
 
+interface AuthState {
+  status: AuthStatus;
+  user: AuthUser | null;
+  tenant: Tenant | null;
+  role: UserRole | null;
+  permissions: string[];
+}
+
+type AuthAction =
+  | { type: "session-restored"; session: AuthSession }
+  | { type: "session-cleared" };
+
+const initialAuthState: AuthState = {
+  status: "initializing",
+  user: null,
+  tenant: null,
+  role: null,
+  permissions: [],
+};
+
+const unauthenticatedState: AuthState = {
+  status: "unauthenticated",
+  user: null,
+  tenant: null,
+  role: null,
+  permissions: [],
+};
+
+function authReducer(_state: AuthState, action: AuthAction): AuthState {
+  if (action.type === "session-cleared") return unauthenticatedState;
+
+  return {
+    status: "authenticated",
+    user: action.session.user,
+    tenant: action.session.tenant,
+    role: action.session.role,
+    permissions: action.session.permissions,
+  };
+}
+
+function parseSession(data: unknown): AuthSession | null {
+  if (!data || typeof data !== "object") return null;
+  const candidate = data as Partial<AuthSession>;
+  if (!candidate.user || !candidate.tenant) return null;
+  return {
+    user: candidate.user,
+    tenant: candidate.tenant,
+    role: candidate.role || "viewer",
+    permissions: Array.isArray(candidate.permissions) ? candidate.permissions : [],
+  };
+}
+
 const AuthContext = createContext<AuthContextValue | null>(null);
 
 export function useAuth(): AuthContextValue {
@@ -54,55 +114,25 @@ interface AuthProviderProps {
 }
 
 export function AuthProvider({ children }: AuthProviderProps) {
-  const [status, setStatus] = useState<AuthStatus>("initializing");
-  const [user, setUser] = useState<AuthUser | null>(null);
-  const [tenant, setTenant] = useState<Tenant | null>(null);
-  const [role, setRole] = useState<UserRole | null>(null);
-  const [permissions, setPermissions] = useState<string[]>([]);
-  const [isSystemAdmin, setIsSystemAdmin] = useState(false);
-
-  const parseSession = useCallback((data: any): AuthSession | null => {
-    if (!data?.user || !data?.tenant) return null;
-    return {
-      user: data.user as AuthUser,
-      tenant: data.tenant as Tenant,
-      role: (data.role || "viewer") as UserRole,
-      permissions: Array.isArray(data.permissions) ? data.permissions : [],
-    };
-  }, []);
+  const [state, dispatch] = useReducer(authReducer, initialAuthState);
 
   const refreshSession = useCallback(async () => {
     try {
-      const data = await apiGet<any>("/api/auth/session");
+      const data = await apiGet<unknown>("/api/auth/session");
       const session = parseSession(data);
-      if (session) {
-        setUser(session.user);
-        setTenant(session.tenant);
-        setRole(session.role);
-        setPermissions(session.permissions);
-        setIsSystemAdmin(!!session.user.is_system_admin);
-        setStatus("authenticated");
-      } else {
-        setStatus("unauthenticated");
-      }
+      if (session) dispatch({ type: "session-restored", session });
+      else dispatch({ type: "session-cleared" });
     } catch {
-      setStatus("unauthenticated");
+      dispatch({ type: "session-cleared" });
     }
-  }, [parseSession]);
+  }, []);
 
   useEffect(() => {
-    refreshSession();
+    void refreshSession();
   }, [refreshSession]);
 
   useEffect(() => {
-    const handler = () => {
-      setUser(null);
-      setTenant(null);
-      setRole(null);
-      setPermissions([]);
-      setIsSystemAdmin(false);
-      setStatus("unauthenticated");
-    };
+    const handler = () => dispatch({ type: "session-cleared" });
     window.addEventListener("saas:session-expired", handler);
     return () => window.removeEventListener("saas:session-expired", handler);
   }, []);
@@ -118,14 +148,10 @@ export function AuthProvider({ children }: AuthProviderProps) {
     try {
       await apiPost("/api/auth/logout");
     } catch {
-      // Ignore logout errors
+      // Local authentication state must still be cleared if the server is unavailable.
+    } finally {
+      dispatch({ type: "session-cleared" });
     }
-    setUser(null);
-    setTenant(null);
-    setRole(null);
-    setPermissions([]);
-    setIsSystemAdmin(false);
-    setStatus("unauthenticated");
   }, []);
 
   const changePassword = useCallback(async (currentPassword: string, newPassword: string) => {
@@ -135,24 +161,21 @@ export function AuthProvider({ children }: AuthProviderProps) {
     });
   }, []);
 
+  const isSystemAdmin = !!state.user?.is_system_admin;
   const hasPermission = useCallback((permission: string): boolean => {
     if (isSystemAdmin) return true;
-    return permissions.includes(permission);
-  }, [permissions, isSystemAdmin]);
+    return state.permissions.includes(permission);
+  }, [state.permissions, isSystemAdmin]);
 
-  const value: AuthContextValue = {
-    status,
-    user,
-    tenant,
-    role,
-    permissions,
+  const value = useMemo<AuthContextValue>(() => ({
+    ...state,
     isSystemAdmin,
     login,
     logout,
     changePassword,
     refreshSession,
     hasPermission,
-  };
+  }), [state, isSystemAdmin, login, logout, changePassword, refreshSession, hasPermission]);
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;
 }

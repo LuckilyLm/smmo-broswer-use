@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
-import { buildReplyPreflightWarnings } from '../pages/CampaignSettings'
-import { getStatusLabel } from '../components/ui/StatusBadge'
+import { buildReplyPreflightWarnings } from '../pages/campaignSettingsHelpers'
+import { getStatusLabel } from '../components/ui/statusBadgeHelpers'
 
 describe('campaign demo workflow helpers', () => {
   it('warns when replies are enabled without a send-ready configuration', () => {

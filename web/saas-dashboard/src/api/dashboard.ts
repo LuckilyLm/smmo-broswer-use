@@ -109,14 +109,32 @@ const intentLabels: Record<string, string> = {
   unknown: "未知",
 };
 
+function mapDefined<T, U>(items: T[], transform: (item: T) => U | undefined): U[] {
+  const result: U[] = [];
+  items.forEach((item) => {
+    const transformed = transform(item);
+    if (transformed !== undefined) result.push(transformed);
+  });
+  return result;
+}
+
 function safeNumber(value: unknown): number {
   return typeof value === "number" && Number.isFinite(value) ? value : 0;
 }
 
+const dashboardDateTimeFormatter = new Intl.DateTimeFormat("zh-CN", {
+  year: "numeric",
+  month: "numeric",
+  day: "numeric",
+  hour: "numeric",
+  minute: "numeric",
+  second: "numeric",
+});
+
 function formatDateTime(value?: string | null): string {
   if (!value) return "—";
   const date = new Date(value);
-  return Number.isNaN(date.getTime()) ? "—" : date.toLocaleString("zh-CN");
+  return Number.isNaN(date.getTime()) ? "—" : dashboardDateTimeFormatter.format(date);
 }
 
 export function normalizeDashboardData(raw: RawDashboardResponse | null | undefined): DashboardSummary {
@@ -138,19 +156,23 @@ export function normalizeDashboardData(raw: RawDashboardResponse | null | undefi
     tokens_this_month: safeNumber(source.tokens_this_month),
     system_send_enabled: source.system_send_enabled === true,
     reply_safety_message: source.reply_safety_message || "",
-    lead_trend: (Array.isArray(source.lead_trend) ? source.lead_trend : []).map((item) => ({
-      day: String(item.day || item.date || ""),
-      leads: safeNumber(item.leads),
-      scanned: safeNumber(item.scanned ?? item.comments_scanned),
-    })).filter((item) => item.day),
-    intent_distribution: (Array.isArray(source.intent_distribution) ? source.intent_distribution : []).map((item) => {
+    lead_trend: mapDefined(Array.isArray(source.lead_trend) ? source.lead_trend : [], (item) => {
+      const day = String(item.day || item.date || "");
+      return day ? {
+        day,
+        leads: safeNumber(item.leads),
+        scanned: safeNumber(item.scanned ?? item.comments_scanned),
+      } : undefined;
+    }),
+    intent_distribution: mapDefined(Array.isArray(source.intent_distribution) ? source.intent_distribution : [], (item) => {
       const key = String(item.intent_level || item.name || "unknown").toLowerCase();
-      return {
+      const value = safeNumber(item.value ?? item.count);
+      return value > 0 ? {
         name: item.name || intentLabels[key] || intentLabels.unknown,
-        value: safeNumber(item.value ?? item.count),
+        value,
         color: item.color || intentColors[key] || intentColors.unknown,
-      };
-    }).filter((item) => item.value > 0),
+      } : undefined;
+    }),
     campaign_performance: (Array.isArray(source.campaign_performance) ? source.campaign_performance : []).map((item) => ({
       id: item.campaign_id || item.campaign_name || "",
       name: item.campaign_name || "未命名活动",

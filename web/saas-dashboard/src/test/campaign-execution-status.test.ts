@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import type { Execution } from '../api/executions'
-import { campaignStatusLabel, executionStatusLabel, latestExecutionsByCampaign } from '../pages/Campaigns'
+import { campaignStatusLabel, executionStatusLabel, latestExecutionsByCampaign } from '../pages/campaignHelpers'
 
 function execution(overrides: Partial<Execution>): Execution {
   return {

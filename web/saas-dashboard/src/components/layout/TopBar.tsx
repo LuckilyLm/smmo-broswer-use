@@ -10,7 +10,7 @@ import {
   Settings,
 } from "lucide-react";
 import { useAuth } from "../../auth/AuthProvider";
-import { useWorkspace } from "../../workspace/WorkspaceProvider";
+import { useWorkspace } from "../../workspace/useWorkspace";
 import { setAppLocale, type AppLocale } from "../../i18n";
 import { useNotifications } from "../../api/notifications";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";

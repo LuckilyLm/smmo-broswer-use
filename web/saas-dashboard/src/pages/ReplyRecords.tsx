@@ -4,6 +4,8 @@ import { Filter, MessageSquareOff, Search, X } from 'lucide-react'
 import { useReplyRecord, useReplyRecords, type ReplyRecord } from '../api/reply-records'
 import StatusBadge from '../components/ui/StatusBadge'
 
+const EMPTY_REPLY_RECORDS: ReplyRecord[] = []
+
 function formatDate(value?: string | null) {
   if (!value) return '—'
   const date = new Date(value)
@@ -32,9 +34,10 @@ export default function ReplyRecords() {
   const [detailId, setDetailId] = useState<string | null>(null)
   const { data, isLoading, error } = useReplyRecords({ limit: 100, offset: 0 })
   const { data: detailData, isLoading: detailLoading } = useReplyRecord(detailId)
-  const records = data?.items || []
-  const filtered = useMemo(() => records.filter((record) => !search || rowText(record).includes(search.toLowerCase())), [records, search])
-  const detail = detailData?.record || records.find((record) => record.id === detailId)
+  const records = data?.items ?? EMPTY_REPLY_RECORDS
+  const recordById = useMemo(() => new Map(records.map((record) => [record.id, record])), [records])
+  const filtered = useMemo(() => records.filter((record) => !search || rowText(record).indexOf(search.toLowerCase()) !== -1), [records, search])
+  const detail = detailData?.record || (detailId ? recordById.get(detailId) : undefined)
 
   return (
     <div className="flex min-h-full flex-col">
@@ -54,7 +57,9 @@ export default function ReplyRecords() {
         <div className="flex flex-wrap items-center gap-2">
           <div className="relative min-w-0 flex-1" style={{ maxWidth: 280 }}>
             <Search size={13} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-gray-400" />
+            <label htmlFor="reply-record-search" className="sr-only">搜索回复记录</label>
             <input
+              id="reply-record-search"
               type="text"
               placeholder="搜索记录、活动或错误..."
               value={search}
@@ -64,6 +69,7 @@ export default function ReplyRecords() {
             />
           </div>
           <button
+            type="button"
             className="flex items-center gap-1.5 rounded-lg border px-3 py-2.5 text-sm hover:bg-gray-50 md:hidden"
             style={{ borderColor: 'var(--border)', minHeight: 44 }}
             onClick={() => setFilterOpen(true)}
@@ -90,7 +96,7 @@ export default function ReplyRecords() {
                 </thead>
                 <tbody>
                   {filtered.map((record) => (
-                    <tr key={record.id} className="cursor-pointer border-b last:border-0 hover:bg-gray-50" style={{ borderColor: 'var(--border)' }} onClick={() => setDetailId(record.id)}>
+                    <tr key={record.id} className="cursor-pointer border-b last:border-0 hover:bg-gray-50" style={{ borderColor: 'var(--border)' }} onClick={() => setDetailId(record.id)} onKeyDown={(event) => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); setDetailId(record.id) } }} role="button" tabIndex={0} aria-label={`查看回复记录 ${record.id}`}>
                       <td className="px-4 py-3 font-mono text-xs text-gray-500">{record.id}</td>
                       <td className="px-4 py-3 font-mono text-xs text-gray-500">{record.campaign_id}</td>
                       <td className="px-4 py-3 font-mono text-xs text-gray-500">{record.reply_candidate_id || '—'}</td>
@@ -110,7 +116,7 @@ export default function ReplyRecords() {
 
         <div className="flex flex-col gap-3 md:hidden">
           {filtered.map((record) => (
-            <button key={record.id} className="rounded-xl border bg-white p-4 text-left active:bg-gray-50" style={{ borderColor: 'var(--border)' }} onClick={() => setDetailId(record.id)}>
+            <button type="button" key={record.id} className="rounded-xl border bg-white p-4 text-left active:bg-gray-50" style={{ borderColor: 'var(--border)' }} onClick={() => setDetailId(record.id)}>
               <div className="flex items-start justify-between gap-2">
                 <div className="min-w-0">
                   <div className="truncate font-mono text-xs text-gray-500">{record.id}</div>
@@ -126,14 +132,14 @@ export default function ReplyRecords() {
 
       {detailId && (
         <>
-          <div className="fixed inset-0 z-30 bg-black/20" onClick={() => setDetailId(null)} />
+          <button type="button" aria-label="关闭回复记录详情" className="fixed inset-0 z-30 bg-black/20" onClick={() => setDetailId(null)} />
           <div className="fixed inset-0 z-40 flex min-h-0 flex-col overflow-hidden bg-white shadow-xl md:inset-y-0 md:left-auto md:right-0 md:w-[480px] md:border-l" style={{ borderColor: 'var(--border)' }}>
             <div className="flex shrink-0 items-center justify-between border-b px-4 py-3" style={{ borderColor: 'var(--border)' }}>
               <div>
                 <h3 className="font-semibold text-gray-900">回复记录详情</h3>
                 <div className="mt-0.5 font-mono text-xs text-gray-400">{detailId}</div>
               </div>
-              <button className="p-2 text-gray-400 hover:text-gray-600" onClick={() => setDetailId(null)} style={{ minHeight: 44, minWidth: 44 }}><X size={16} /></button>
+              <button type="button" aria-label="关闭回复记录详情" className="p-2 text-gray-400 hover:text-gray-600" onClick={() => setDetailId(null)} style={{ minHeight: 44, minWidth: 44 }}><X size={16} /></button>
             </div>
             <div className="flex flex-1 flex-col gap-4 overflow-y-auto p-4">
               {detailLoading && <div className="text-sm text-gray-500">正在加载详情...</div>}
@@ -168,14 +174,14 @@ export default function ReplyRecords() {
 
       {filterOpen && (
         <>
-          <div className="fixed inset-0 z-30 bg-black/30" onClick={() => setFilterOpen(false)} />
+          <button type="button" aria-label="关闭筛选" className="fixed inset-0 z-30 bg-black/30" onClick={() => setFilterOpen(false)} />
           <div className="fixed inset-x-0 bottom-0 z-40 flex flex-col gap-4 rounded-t-2xl bg-white p-5" style={{ paddingBottom: 'max(20px, env(safe-area-inset-bottom))' }}>
             <div className="flex items-center justify-between">
               <span className="font-semibold text-gray-900">筛选</span>
-              <button className="p-2 text-gray-400" onClick={() => setFilterOpen(false)} style={{ minHeight: 44, minWidth: 44 }}><X size={16} /></button>
+              <button type="button" aria-label="关闭筛选" className="p-2 text-gray-400" onClick={() => setFilterOpen(false)} style={{ minHeight: 44, minWidth: 44 }}><X size={16} /></button>
             </div>
             <div className="text-sm text-gray-500">当前移动端先支持搜索过滤；状态和日期过滤会继续接入后端查询参数。</div>
-            <button className="w-full rounded-xl py-3 text-sm font-medium text-white" style={{ background: 'var(--primary)', minHeight: 44 }} onClick={() => setFilterOpen(false)}>
+            <button type="button" className="w-full rounded-xl py-3 text-sm font-medium text-white" style={{ background: 'var(--primary)', minHeight: 44 }} onClick={() => setFilterOpen(false)}>
               确定
             </button>
           </div>

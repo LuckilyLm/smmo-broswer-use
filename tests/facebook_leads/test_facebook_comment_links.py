@@ -4,6 +4,7 @@ from src.facebook_leads.facebook.comment_links import (
     build_direct_comment_url,
     extract_comment_id_from_url,
     extract_comment_permalink_from_node,
+    normalize_comment_permalink,
     resolve_comment_links,
 )
 from src.facebook_leads.facebook.comments import extract_comments, locate_comment_node
@@ -35,6 +36,33 @@ def test_node_permalink_priority_prefers_comment_id_link():
     }
 
     assert extract_comment_permalink_from_node(node) == "https://www.facebook.com/reel/1?comment_id=comment-1"
+
+
+def test_normalize_comment_permalink_decodes_redirect_and_html_ampersand():
+    redirected = (
+        "https://l.facebook.com/l.php?u="
+        "https%3A%2F%2Fwww.facebook.com%2Freel%2F1%3Fcomment_id%3Dcomment-1%26foo%3Dbar"
+        "&amp;h=tracking"
+    )
+
+    assert normalize_comment_permalink(redirected) == (
+        "https://www.facebook.com/reel/1?comment_id=comment-1&foo=bar"
+    )
+
+
+def test_extract_node_permalink_supports_relative_links_and_comment_id_to_reply():
+    node = {
+        "page_url": "https://www.facebook.com/reel/1",
+        "links": [
+            {"href": "/reel/1?foo=bar&amp;comment_id_to_reply=reply-1#comments"},
+            {"href": "https://example.com/reel/1?comment_id=wrong-host"},
+        ],
+    }
+
+    assert extract_comment_permalink_from_node(node) == (
+        "https://www.facebook.com/reel/1?foo=bar&comment_id_to_reply=reply-1"
+    )
+    assert extract_comment_id_from_url(extract_comment_permalink_from_node(node)) == "reply-1"
 
 
 def test_build_direct_comment_url_uses_permalink_before_generating_candidate():

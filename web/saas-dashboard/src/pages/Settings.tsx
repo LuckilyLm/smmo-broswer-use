@@ -78,11 +78,10 @@ export default function Settings() {
 
   const handleSave = async () => {
     if (!form || !saved || !dirty) return
-    const changes = Object.fromEntries(
-      (Object.keys(form) as Array<keyof EditableSettings>)
-        .filter((key) => form[key] !== saved[key])
-        .map((key) => [key, form[key]]),
-    ) as UpdateSettingsInput
+    const changes = (Object.keys(form) as Array<keyof EditableSettings>).reduce<Record<string, EditableSettings[keyof EditableSettings]>>((result, key) => {
+      if (form[key] !== saved[key]) result[key] = form[key]
+      return result
+    }, {}) as UpdateSettingsInput
 
     setSaveState('saving')
     try {
@@ -124,7 +123,7 @@ export default function Settings() {
 
       <section className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
         <div className="shrink-0 border-b bg-card px-4 py-2 md:hidden">
-          <select className={inputClass} value={activeSection} onChange={(event) => scrollTo(event.target.value as SectionId)}>
+          <select aria-label="设置区域" className={inputClass} value={activeSection} onChange={(event) => scrollTo(event.target.value as SectionId)}>
             {sectionItems.map((section) => <option key={section.id} value={section.id}>{section.label}</option>)}
           </select>
         </div>
@@ -174,10 +173,16 @@ export default function Settings() {
                   </select>
                 </Field>
                 <Field label="最低置信度">
-                  <input type="number" min="0" max="1" step="0.05" className={inputClass} value={form.default_min_confidence} onChange={(event) => setField('default_min_confidence', Number(event.target.value))} />
+                  <input type="number" min="0" max="1" step="0.05" className={inputClass} value={form.default_min_confidence} onChange={(event) => {
+                    const value = event.target.valueAsNumber
+                    if (!Number.isNaN(value)) setField('default_min_confidence', value)
+                  }} />
                 </Field>
                 <Field label="每日上限">
-                  <input type="number" min="1" max="10000" className={inputClass} value={form.default_daily_limit} onChange={(event) => setField('default_daily_limit', Number(event.target.value))} />
+                  <input type="number" min="1" max="10000" className={inputClass} value={form.default_daily_limit} onChange={(event) => {
+                    const value = event.target.valueAsNumber
+                    if (!Number.isNaN(value)) setField('default_daily_limit', value)
+                  }} />
                 </Field>
               </div>
             </SettingsSection>
@@ -192,7 +197,7 @@ export default function Settings() {
                   </div>
                 </div>
               </div>
-              <label className="flex min-h-14 items-center justify-between gap-4 rounded-xl border bg-card px-4 py-3">
+              <div className="flex min-h-14 items-center justify-between gap-4 rounded-xl border bg-card px-4 py-3">
                 <span className="min-w-0">
                   <span className="block text-sm font-medium">允许租户回复</span>
                   <span className="mt-0.5 block text-xs text-muted-foreground">关闭后，本租户不会向平台发送真实回复。</span>
@@ -200,13 +205,14 @@ export default function Settings() {
                 <button
                   type="button"
                   role="switch"
+                  aria-label="允许租户回复"
                   aria-checked={form.tenant_reply_enabled}
                   className={`relative h-7 w-12 shrink-0 rounded-full transition ${form.tenant_reply_enabled ? 'bg-primary' : 'bg-muted-foreground/35'}`}
                   onClick={() => form.tenant_reply_enabled ? setField('tenant_reply_enabled', false) : setConfirmOpen(true)}
                 >
                   <span className={`absolute top-1 h-5 w-5 rounded-full bg-white shadow transition ${form.tenant_reply_enabled ? 'left-6' : 'left-1'}`} />
                 </button>
-              </label>
+              </div>
               {!data.system_send_enabled && (
                 <p className="flex items-start gap-2 text-xs text-muted-foreground"><Info className="mt-0.5 h-3.5 w-3.5 shrink-0" />即使开启租户开关，系统级发送关闭时仍不会发送真实回复。</p>
               )}

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 from pathlib import Path
 
@@ -206,7 +207,7 @@ def test_manual_approval_guards_disabled_runtime_and_idempotency(service: SaaSSe
     candidate = service.approve_reply_candidate(ctx, candidates[0]["id"])
     assert service.approve_reply_candidate(ctx, candidate["id"])["status"] == "approved"
     plan = service.approve_reply_plan(ctx, plan["id"])
-    assert service.execute_reply_plan(ctx, plan["id"])["blocked_reason"] == "system_send_disabled"
+    assert asyncio.run(service.execute_reply_plan(ctx, plan["id"]))["blocked_reason"] == "system_send_disabled"
     assert service.list_reply_records(ctx)["items"][0]["status"] == "blocked"
 
 
@@ -366,7 +367,7 @@ def test_zero_candidate_plan_is_blocked_and_cannot_be_approved_or_executed(servi
     with pytest.raises(ServiceConflictError, match="no_candidates"):
         service.approve_reply_plan(ctx, plan["id"])
     with pytest.raises(ServiceConflictError, match="plan_not_executable"):
-        service.execute_reply_plan(ctx, plan["id"])
+        asyncio.run(service.execute_reply_plan(ctx, plan["id"]))
     assert service.list_reply_records(ctx)["total"] == 0
 
 
@@ -404,7 +405,7 @@ def test_disabled_send_persists_one_associated_idempotent_record_per_approved_ca
     service.bulk_approve_reply_candidates(ctx, [candidate["id"] for candidate in candidates])
     service.approve_reply_plan(ctx, plan["id"])
 
-    executed = service.execute_reply_plan(ctx, plan["id"])
+    executed = asyncio.run(service.execute_reply_plan(ctx, plan["id"]))
     records = service.list_reply_records(ctx)["items"]
 
     assert executed["status"] == "blocked"
@@ -414,6 +415,31 @@ def test_disabled_send_persists_one_associated_idempotent_record_per_approved_ca
     assert {record["comment_id"] for record in records} == {"c1", "c2"}
     assert all(record["reply_plan_id"] == plan["id"] and record["reply_text"] and record["status"] == "blocked" for record in records)
     assert len({record["idempotency_key"] for record in records}) == 2
+
+
+
+
+def test_reply_sender_persists_verified_sent_outcome(tmp_path, service: SaaSService, ctx: TenantContext, campaign: dict):
+    async def sender(candidate, _campaign, _account):
+        return {"result": {"status": "sent", "sent": True, "verified": True}}
+
+    service.reply_sender = sender
+    template = service.create_reply_template(ctx, {"name": "Contact", "content": "Contact {{contact}}", "is_default": True})
+    service.create_reply_match_rule(ctx, {"campaign_id": campaign["id"], "reply_template_id": template["id"], "name": "Contact", "contains_any_json": ["contact"]})
+    execution = _execution(service, ctx, campaign)
+    _scan_artifact(service, ctx, execution["id"], [{"comment_id": "c1", "text": "contact me", "fingerprint": "fp1"}])
+    plan = service.generate_reply_plan_for_execution(ctx, execution["id"])
+    candidate = service.list_reply_candidates(ctx)["items"][0]
+    service.approve_reply_candidate(ctx, candidate["id"])
+    service.approve_reply_plan(ctx, plan["id"])
+    service._reply_send_guard = lambda *_args: None
+
+    result = asyncio.run(service.execute_reply_plan(ctx, plan["id"]))
+
+    record = service.list_reply_records(ctx)["items"][0]
+    assert result["status"] == "executed"
+    assert record["status"] == "sent" and bool(record["verified"])
+    assert service.storage.get_by_id("reply_candidates", candidate["id"])["status"] == "sent"
 
 
 def _execution(service: SaaSService, ctx: TenantContext, campaign: dict) -> dict:

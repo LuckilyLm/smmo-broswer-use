@@ -10,6 +10,7 @@ export default function SafetyAlert({ onViewSettings }: SafetyAlertProps) {
   if (dismissed) return null
   return (
     <div
+      role="status"
       className="flex items-start gap-3 px-4 py-3 rounded-xl border"
       style={{ background: '#fffbeb', borderColor: '#fcd34d' }}
     >
@@ -24,6 +25,7 @@ export default function SafetyAlert({ onViewSettings }: SafetyAlertProps) {
       </div>
       <div className="flex items-center gap-2 shrink-0">
         <button
+          type="button"
           className="flex items-center gap-1 text-xs font-medium px-2.5 py-1.5 rounded-lg border transition-colors hover:bg-amber-100"
           style={{ borderColor: '#fcd34d', color: '#92400e' }}
           onClick={onViewSettings}
@@ -32,6 +34,8 @@ export default function SafetyAlert({ onViewSettings }: SafetyAlertProps) {
           查看安全设置
         </button>
         <button
+          type="button"
+          aria-label="关闭安全提示"
           className="text-amber-400 hover:text-amber-600 transition-colors"
           onClick={() => setDismissed(true)}
         >

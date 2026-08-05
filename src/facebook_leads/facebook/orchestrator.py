@@ -66,6 +66,7 @@ class FacebookLeadsRunConfig:
     resume_run_id: str | None = None
     target_policy: TargetPolicyConfig = field(default_factory=build_target_policy_config)
     custom_positive_keywords: tuple[str, ...] = ()
+    excluded_content_identities: frozenset[str] = frozenset()
 
 
 @dataclass
@@ -292,6 +293,7 @@ async def default_scan(config: FacebookLeadsRunConfig, run_dir: Path) -> dict[st
         artifacts_dir=str(run_dir / "logs"),
         resume_scan_result=str(previous_scan_path) if config.resume_run_id else None,
         cdp_url=config.cdp_url,
+        excluded_content_identities=config.excluded_content_identities,
     )
     scan_payload = await run_cli_scan(scan_args)
     report = build_lead_report(scan_payload, custom_positive_keywords=config.custom_positive_keywords)

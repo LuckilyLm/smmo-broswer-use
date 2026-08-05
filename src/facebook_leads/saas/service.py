@@ -5,8 +5,10 @@ import json
 import re
 from datetime import datetime, time, timedelta, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Awaitable, Callable
 from zoneinfo import ZoneInfo
+
+from src.facebook_leads.facebook.search import canonical_facebook_content_identity
 
 from .auth import hash_password, needs_rehash, verify_password
 from .artifacts import load_json_safe, safe_artifact_path
@@ -87,6 +89,7 @@ REPLY_MATCH_RULE_WRITE_FIELDS = {
 }
 REPLY_MODES = {"disabled", "manual_approval", "automatic"}
 LEAD_DETECTION_MODES = {"rules_only", "rules_with_llm"}
+ReplySender = Callable[[dict[str, Any], dict[str, Any], dict[str, Any]], Awaitable[dict[str, Any]]]
 
 
 class SaaSService:
@@ -103,12 +106,14 @@ class SaaSService:
         session_ttl_hours: int | None = None,
         session_idle_timeout_hours: int | None = None,
         config: ProductionConfig | None = None,
+        reply_sender: ReplySender | None = None,
     ) -> None:
         self.storage = storage
         self.providers = providers or default_provider_registry()
         self.artifacts_root = Path(artifacts_root)
         self.runtime_registry = runtime_registry or BrowserRuntimeRegistry(storage)
         self.config = config
+        self.reply_sender = reply_sender
         self.max_queued_executions_per_tenant = max_queued_executions_per_tenant or 50
         self.session_ttl = timedelta(hours=session_ttl_hours or 168)
         self.session_idle_timeout = timedelta(hours=session_idle_timeout_hours or 24)
@@ -963,7 +968,7 @@ class SaaSService:
             raise ServiceConflictError("plan_not_cancellable")
         return self.storage.update_by_id("reply_plans", plan_id, {"status": "cancelled"}, tenant_id=context.tenant_id) or plan
 
-    def execute_reply_plan(self, context: TenantContext, plan_id: str) -> dict[str, Any]:
+    async def execute_reply_plan(self, context: TenantContext, plan_id: str) -> dict[str, Any]:
         plan = self._require_reply_plan(context, plan_id)
         self._require_reply_approval_role(context, automatic_allowed=True)
         plan = self._sync_reply_plan(context, plan_id) or plan
@@ -978,27 +983,81 @@ class SaaSService:
         guard = self._reply_send_guard(context, plan)
         if guard:
             for candidate in approved_candidates:
-                self.storage.insert_ignore(
-                    "reply_records",
-                    {
-                        "tenant_id": context.tenant_id,
-                        "reply_candidate_id": candidate["id"],
-                        "reply_plan_id": plan_id,
-                        "campaign_id": plan["campaign_id"],
-                        "platform_account_id": plan["platform_account_id"],
-                        "comment_id": candidate.get("comment_id"),
-                        "reply_text": candidate.get("rendered_reply_text") or "",
-                        "status": "blocked",
-                        "verified": False,
-                        "error_type": guard,
-                        "error_message": guard,
-                        "idempotency_key": f"{candidate['id']}:blocked:{guard}",
-                    },
-                )
+                self._persist_reply_record(context, plan, candidate, status="blocked", verified=False, error_type=guard, error_message=guard, key_suffix=f"blocked:{guard}")
             return self.storage.update_by_id("reply_plans", plan_id, {"status": "blocked", "blocked_reason": guard}, tenant_id=context.tenant_id) or plan
-        # Sending remains deliberately unavailable here. A future sender must persist and
-        # verify each candidate outcome before marking the plan executed.
-        raise ServiceConflictError("reply_sender_not_implemented")
+        campaign = self._require_campaign(context, plan["campaign_id"])
+        account = self._require_platform_account(context, plan["platform_account_id"])
+        sender = self.reply_sender or self._send_reply_candidate
+        sent_count = 0
+        failed_count = 0
+        for candidate in approved_candidates:
+            existing = self.storage.find_one("reply_records", {"tenant_id": context.tenant_id, "idempotency_key": f"{candidate['id']}:send"})
+            if existing and existing.get("status") == "sent" and existing.get("verified"):
+                sent_count += 1
+                continue
+            try:
+                payload = await sender(candidate, campaign, account)
+                result = payload.get("result") or payload
+            except Exception as exc:
+                result = {"status": "failed", "verified": False, "error_type": type(exc).__name__, "error": str(exc)}
+            verified = bool(result.get("verified"))
+            status = "sent" if result.get("sent") and verified else str(result.get("status") or "failed")
+            if status not in {"sent", "blocked", "unverified", "failed", "duplicate"}:
+                status = "failed"
+            self._persist_reply_record(context, plan, candidate, status=status, verified=verified, error_type=result.get("error_type"), error_message=result.get("error") or result.get("error_message"), key_suffix="send", existing=existing)
+            if status == "sent":
+                sent_count += 1
+                self.storage.update_by_id("reply_candidates", candidate["id"], {"status": "sent", "sent_at": utc_now(), "last_error": None}, tenant_id=context.tenant_id)
+            else:
+                failed_count += 1
+                self.storage.update_by_id("reply_candidates", candidate["id"], {"status": "failed", "last_error": result.get("error") or status}, tenant_id=context.tenant_id)
+        status = "executed" if sent_count == len(approved_candidates) else "partial" if sent_count else "failed"
+        return self.storage.update_by_id("reply_plans", plan_id, {"status": status, "sent_count": sent_count, "failed_count": failed_count, "blocked_reason": None, "executed_at": utc_now()}, tenant_id=context.tenant_id) or plan
+
+    async def _send_reply_candidate(self, candidate: dict[str, Any], campaign: dict[str, Any], account: dict[str, Any]) -> dict[str, Any]:
+        from browser_use.browser.browser import BrowserConfig
+        from browser_use.browser.context import BrowserContextConfig
+        from src.browser.custom_browser import CustomBrowser
+        from src.facebook_leads.browser_adapter import get_browser_window_size, select_active_or_facebook_page
+        from src.facebook_leads.facebook.reply import ReplyRequest, reply_to_comment
+
+        runtime = self.runtime_registry.get_runtime(
+            TenantContext(tenant_id=candidate["tenant_id"], user_id="worker", role="worker"),
+            account["id"],
+        )
+        if not runtime or not runtime.get("cdp_url"):
+            raise RuntimeError("browser_runtime_cdp_missing")
+        width, height = get_browser_window_size()
+        context_config = BrowserContextConfig(keep_alive=True, force_new_context=False, window_width=width, window_height=height)
+        browser = CustomBrowser(config=BrowserConfig(cdp_url=runtime["cdp_url"], headless=False, keep_alive=True, new_context_config=context_config))
+        browser_context = await browser.new_context(context_config)
+        page = await select_active_or_facebook_page(browser_context)
+        request = ReplyRequest(
+            source_content_url=str(candidate.get("source_content_url") or ""),
+            direct_comment_url=candidate.get("direct_comment_url"),
+            comment_id=candidate.get("comment_id"),
+            author_name=candidate.get("author_name"),
+            comment_text=candidate.get("comment_text"),
+            fingerprint=candidate.get("comment_fingerprint"),
+            reply_text=str(candidate.get("rendered_reply_text") or ""),
+            confirm_send=True,
+            yes=True,
+            send_confirmed=True,
+            reply_source="saas_automatic",
+            target_policy=campaign.get("target_policy"),
+            reply_allowed=True,
+        )
+        execution_id = candidate.get("execution_id") or "unknown"
+        artifacts_dir = safe_artifact_path(self.artifacts_root, "tenants", candidate["tenant_id"], "executions", execution_id, "replies")
+        history_path = safe_artifact_path(self.artifacts_root, "tenants", candidate["tenant_id"], "reply_history.jsonl")
+        return await reply_to_comment(page, request, artifacts_dir=artifacts_dir, history_path=history_path)
+
+    def _persist_reply_record(self, context: TenantContext, plan: dict[str, Any], candidate: dict[str, Any], *, status: str, verified: bool, error_type: str | None, error_message: str | None, key_suffix: str, existing: dict[str, Any] | None = None) -> None:
+        payload = {"tenant_id": context.tenant_id, "reply_candidate_id": candidate["id"], "reply_plan_id": plan["id"], "campaign_id": plan["campaign_id"], "platform_account_id": plan["platform_account_id"], "comment_id": candidate.get("comment_id"), "reply_text": candidate.get("rendered_reply_text") or "", "status": status, "verified": verified, "error_type": error_type, "error_message": error_message, "idempotency_key": f"{candidate['id']}:{key_suffix}"}
+        if existing:
+            self.storage.update_by_id("reply_records", existing["id"], payload, tenant_id=context.tenant_id)
+        else:
+            self.storage.insert_ignore("reply_records", payload)
 
     def list_reply_records(self, context: TenantContext, *, limit: int = 100, offset: int = 0) -> dict[str, Any]:
         return self.query_reply_records(context, {}, limit=limit, offset=offset)
@@ -1654,6 +1713,7 @@ class SaaSService:
             failed = 0
             retryable_failures = 0
             last_retryable_error = ("temporary_error", "temporary provider failure")
+            seen_content_identities: set[str] = set()
             for index, keyword in enumerate(keywords, start=1):
                 current = self.storage.get_by_id("executions", execution["id"], tenant_id=context.tenant_id) or execution
                 if current.get("cancel_requested"):
@@ -1682,7 +1742,15 @@ class SaaSService:
                 self.storage.update_by_id("executions", execution["id"], {"current_keyword": keyword["keyword"], "progress_percent": int((index - 1) * 100 / len(keywords))}, tenant_id=context.tenant_id)
                 run_logger.info("keyword run started", extra={"execution_keyword_id": keyword_row["id"], "keyword_index": index, "keyword_total": len(keywords)})
                 try:
-                    result = await provider.run_campaign(self._provider_request(context, execution_campaign, keyword["keyword"], run_context, execution["id"]))
+                    result = await provider.run_campaign(self._provider_request(
+                        context,
+                        execution_campaign,
+                        keyword["keyword"],
+                        run_context,
+                        execution["id"],
+                        excluded_content_identities=frozenset(seen_content_identities),
+                    ))
+                    seen_content_identities.update(_result_content_identities(result))
                     summary = _keyword_summary(result)
                     status = "failed" if result.get("status") in {"failed", "not_implemented"} or result.get("error_type") else "completed"
                     if status == "completed":
@@ -1733,7 +1801,9 @@ class SaaSService:
             self._update_execution_aggregate(context, execution["id"], total=len(keywords), completed=completed, failed=failed, status=status, finished=True)
             final_execution = self._finalize_execution_artifacts(context, execution["id"])
             if status in {"completed", "partial"}:
-                self.generate_reply_plan_for_execution(context, execution["id"])
+                plan = self.generate_reply_plan_for_execution(context, execution["id"])
+                if plan and execution_campaign.get("reply_mode") == "automatic" and plan.get("status") == "approved":
+                    await self.execute_reply_plan(context, plan["id"])
             run_logger.info("queue item run finished", extra={"status": status, "completed": completed, "failed": failed, "keyword_count": len(keywords), "execution_report": bool(final_execution)})
             return self.storage.update_by_id("execution_queue_items", queue_item["id"], {"status": "completed" if status in {"completed", "partial"} else status, "finished_at": utc_now()}, tenant_id=context.tenant_id) or queue_item
         except Exception as exc:
@@ -1745,7 +1815,7 @@ class SaaSService:
             self.storage.release_runtime_lock(database_lock)
             run_logger.info("queue item runtime lock released", extra={"runtime_id": runtime["id"]})
 
-    def _provider_request(self, context: TenantContext, campaign: dict[str, Any], keyword: str, run_context: PlatformRunContext, execution_id: str) -> ProviderRunRequest:
+    def _provider_request(self, context: TenantContext, campaign: dict[str, Any], keyword: str, run_context: PlatformRunContext, execution_id: str, *, excluded_content_identities: frozenset[str] = frozenset()) -> ProviderRunRequest:
         execution_root = safe_artifact_path(
             self.artifacts_root,
             "tenants",
@@ -1765,6 +1835,7 @@ class SaaSService:
             daily_limit=int(campaign["daily_limit"]),
             llm_enabled=bool(campaign["llm_enabled"]),
             custom_positive_keywords=tuple(str(item).strip() for item in (campaign.get("positive_keywords_json") or []) if str(item).strip()),
+            excluded_content_identities=excluded_content_identities,
             history_path=str(execution_root / "reply_history.jsonl"),
             runs_root=str(execution_root / "runs"),
             run_context=run_context,
@@ -1778,6 +1849,8 @@ class SaaSService:
         keywords = self.storage.list("execution_keywords", tenant_id=context.tenant_id, filters={"execution_id": execution_id}, limit=1000)
         leads = self.storage.list("leads", tenant_id=context.tenant_id, filters={"campaign_id": execution["campaign_id"]}, limit=200)
         campaign = self.storage.get_by_id("campaigns", execution["campaign_id"], tenant_id=context.tenant_id)
+        tenant = self.storage.get_by_id("tenants", context.tenant_id) or {}
+        execution = {**execution, "timezone": tenant.get("timezone") or "UTC"}
         if campaign:
             execution = {**execution, "campaign_name": campaign.get("name")}
             account = self.storage.get_by_id("platform_accounts", campaign["platform_account_id"], tenant_id=context.tenant_id)
@@ -2359,10 +2432,33 @@ def _today_start():
     return now.replace(hour=0, minute=0, second=0, microsecond=0)
 
 
-def _keyword_summary(result: dict[str, Any]) -> dict[str, int]:
+def _result_content_identities(result: dict[str, Any]) -> set[str]:
+    scan = result.get("scan") or {}
+    if not scan:
+        paths = result.get("paths") or {}
+        scan = load_json_safe(paths.get("scan_result_json"), default={}) if paths.get("scan_result_json") else {}
+    identities: set[str] = set()
+    for content in scan.get("contents") or []:
+        if not isinstance(content, dict):
+            continue
+        identity = canonical_facebook_content_identity(content.get("url"))
+        if identity:
+            identities.add(identity)
+    return identities
+
+
+def _keyword_summary(result: dict[str, Any]) -> dict[str, Any]:
     scan = result.get("scan_summary") or {}
     plan = result.get("batch_plan_summary") or {}
     review = result.get("llm_review_summary") or {}
+    request_count = int(review.get("call_count") or 0)
+    usage_values = [review.get("prompt_tokens"), review.get("completion_tokens"), review.get("total_tokens")]
+    if request_count <= 0 and not review.get("enabled"):
+        usage_status = "not_called"
+    elif any(value is not None for value in usage_values):
+        usage_status = "recorded"
+    else:
+        usage_status = "unknown_usage"
     return {
         "elapsed_ms": int(result.get("elapsed_ms") or 0),
         "discovered_contents": int(scan.get("scanned_contents") or scan.get("successful_content_count") or 0),
@@ -2370,10 +2466,18 @@ def _keyword_summary(result: dict[str, Any]) -> dict[str, int]:
         "lead_candidates": int(scan.get("lead_candidates") or 0),
         "eligible_count": int(plan.get("eligible_count") or 0),
         "selected_count": int(plan.get("selected_count") or 0),
-        "prompt_tokens": int(review.get("prompt_tokens") or 0),
-        "completion_tokens": int(review.get("completion_tokens") or 0),
-        "total_tokens": int(review.get("total_tokens") or 0),
+        "llm_usage_status": usage_status,
+        "request_count": request_count,
+        "model": review.get("model"),
+        "prompt_tokens": _optional_int(review.get("prompt_tokens")),
+        "completion_tokens": _optional_int(review.get("completion_tokens")),
+        "total_tokens": _optional_int(review.get("total_tokens")),
     }
+
+
+def _optional_int(value: Any) -> int | None:
+    return None if value is None else int(value)
+
 
 
 def _zone(name: str) -> ZoneInfo:

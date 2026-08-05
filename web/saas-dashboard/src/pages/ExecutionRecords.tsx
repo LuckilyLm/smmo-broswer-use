@@ -8,6 +8,9 @@ import { isDemoData } from '../utils/provenance'
 import { Button } from '../components/ui/button'
 import { Skeleton } from '../components/ui/skeleton'
 
+const EMPTY_EXECUTIONS: Execution[] = []
+const EMPTY_ARTIFACTS: ExecutionArtifact[] = []
+
 function formatDateTime(value?: string | null) {
   if (!value) return '—'
   const date = new Date(value)
@@ -60,7 +63,7 @@ function ExecutionDrawer({ execId, onClose }: { execId: string; onClose: () => v
     }
     previousStatus.current = exec?.status
   }, [exec?.status, isActive, refetchArtifacts, refetchKeywords, refetchLogs])
-  const items = artifacts?.items || []
+  const items = artifacts?.items ?? EMPTY_ARTIFACTS
   const report = reportArtifact(items)
   const objectStorage = exec?.config_snapshot?.artifacts?.object_storage
 
@@ -71,7 +74,7 @@ function ExecutionDrawer({ execId, onClose }: { execId: string; onClose: () => v
           <div className="flex items-center gap-2"><h3 className="font-semibold text-gray-900">执行详情</h3>{isDemoData(exec) && <DemoBadge />}</div>
           <div className="mt-0.5 truncate font-mono text-xs text-gray-400">{execId}</div>
         </div>
-        <button className="p-2 text-gray-400 hover:text-gray-600" onClick={onClose} style={{ minHeight: 44, minWidth: 44 }}>
+        <button type="button" aria-label="关闭执行详情" className="p-2 text-gray-400 hover:text-gray-600" onClick={onClose} style={{ minHeight: 44, minWidth: 44 }}>
           <X size={16} />
         </button>
       </div>
@@ -174,10 +177,10 @@ function ExecutionDrawer({ execId, onClose }: { execId: string; onClose: () => v
                     </span>
                     <span className="flex shrink-0 items-center gap-1">
                       <span className="mr-1 hidden text-gray-400 sm:inline">{item.external_url ? '已同步对象存储' : '本地产物'}</span>
-                      <Button size="icon-sm" variant="ghost" title="预览" onClick={() => openArtifact(item)}>
+                      <Button type="button" size="icon-sm" variant="ghost" title="预览" aria-label={`预览 ${item.name}`} onClick={() => openArtifact(item)}>
                         <ExternalLink className="h-3.5 w-3.5" />
                       </Button>
-                      <Button size="icon-sm" variant="ghost" title="下载" onClick={() => downloadArtifact(item)}>
+                      <Button type="button" size="icon-sm" variant="ghost" title="下载" aria-label={`下载 ${item.name}`} onClick={() => downloadArtifact(item)}>
                         <Download className="h-3.5 w-3.5" />
                       </Button>
                     </span>
@@ -194,7 +197,7 @@ function ExecutionDrawer({ execId, onClose }: { execId: string; onClose: () => v
             ) : (
               <div className="max-h-64 overflow-auto rounded-lg bg-gray-950 p-3 font-mono text-[11px] leading-relaxed text-gray-100">
                 {logs.items.map((item, index) => (
-                  <div key={`${item.source || 'log'}-${index}`} className="whitespace-pre-wrap break-words">
+                  <div key={`${item.source || 'log'}-${item.line_number ?? item.line}`} className="whitespace-pre-wrap break-words">
                     <span className="text-gray-500">{String(item.line_number ?? index + 1).padStart(4, '0')} </span>{item.line}
                   </div>
                 ))}
@@ -228,7 +231,7 @@ export default function ExecutionRecords() {
     setSearchParams(next, { replace: true })
   }
   const { data, isLoading, error, refetch, isFetching } = useExecutions({ status: status || undefined, limit: 50, offset: 0 })
-  const executions = data?.items || []
+  const executions = data?.items ?? EMPTY_EXECUTIONS
 
   const filtered = useMemo(() => executions.filter((item) => {
     if (!search) return true
@@ -244,7 +247,7 @@ export default function ExecutionRecords() {
             <h1 className="text-xl font-semibold text-gray-900">执行记录</h1>
             <p className="mt-0.5 hidden text-sm text-gray-500 md:block">查看后端 worker 的真实扫描、候选生成和报告产物</p>
           </div>
-          <Button variant="outline" onClick={() => refetch()} disabled={isFetching}>
+          <Button type="button" variant="outline" onClick={() => refetch()} disabled={isFetching}>
             <RefreshCw className={`h-4 w-4 ${isFetching ? 'animate-spin' : ''}`} /> 刷新
           </Button>
         </div>
@@ -252,7 +255,9 @@ export default function ExecutionRecords() {
         <div className="flex flex-wrap items-center gap-2">
           <div className="relative min-w-0 flex-1" style={{ maxWidth: 280 }}>
             <Search size={13} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-gray-400" />
+            <label htmlFor="execution-search" className="sr-only">搜索执行记录</label>
             <input
+              id="execution-search"
               type="text"
               placeholder="搜索执行 ID / 关键词..."
               value={search}
@@ -261,7 +266,8 @@ export default function ExecutionRecords() {
               style={{ borderColor: 'var(--border)', minHeight: 44 }}
             />
           </div>
-          <select value={status} onChange={(event) => setStatus(event.target.value)} className="rounded-lg border bg-white px-3 py-2.5 text-sm focus:outline-none" style={{ borderColor: 'var(--border)', minHeight: 44 }}>
+          <label htmlFor="execution-status" className="sr-only">筛选执行状态</label>
+          <select id="execution-status" value={status} onChange={(event) => setStatus(event.target.value)} className="rounded-lg border bg-white px-3 py-2.5 text-sm focus:outline-none" style={{ borderColor: 'var(--border)', minHeight: 44 }}>
             <option value="">全部状态</option>
             <option value="running">执行中</option>
             <option value="completed">已完成</option>
@@ -289,7 +295,7 @@ export default function ExecutionRecords() {
                 </thead>
                 <tbody>
                   {filtered.map((item) => (
-                    <tr key={item.id} className="cursor-pointer border-b last:border-0 hover:bg-gray-50" style={{ borderColor: 'var(--border)' }} onClick={() => setOpenDrawer(item.id)}>
+                    <tr key={item.id} className="cursor-pointer border-b last:border-0 hover:bg-gray-50" style={{ borderColor: 'var(--border)' }} onClick={() => setOpenDrawer(item.id)} onKeyDown={(event) => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); setOpenDrawer(item.id) } }} role="button" tabIndex={0} aria-label={`查看执行 ${item.id}`}>
                       <td className="px-3 py-3 font-mono text-xs text-gray-600"><span className="flex items-center gap-1.5">{item.id}{isDemoData(item) && <DemoBadge />}</span></td>
                       <td className="px-3 py-3 text-xs text-gray-500">{item.campaign_id}</td>
                       <td className="px-3 py-3 text-xs text-gray-500">{triggerLabel(item.trigger_type)}</td>
@@ -321,7 +327,7 @@ export default function ExecutionRecords() {
 
         <div className="flex flex-col gap-3 md:hidden">
           {filtered.map((item) => (
-            <button key={item.id} className="rounded-xl border bg-white p-4 text-left active:bg-gray-50" style={{ borderColor: item.status === 'failed' ? '#fca5a5' : 'var(--border)' }} onClick={() => setOpenDrawer(item.id)}>
+            <button key={item.id} type="button" className="rounded-xl border bg-white p-4 text-left active:bg-gray-50" style={{ borderColor: item.status === 'failed' ? '#fca5a5' : 'var(--border)' }} onClick={() => setOpenDrawer(item.id)}>
               <div className="mb-2 flex items-start justify-between gap-2">
                 <div className="min-w-0">
                   <div className="flex items-center gap-1.5"><div className="truncate font-mono text-xs text-gray-800">{item.id}</div>{isDemoData(item) && <DemoBadge />}</div>
@@ -342,7 +348,7 @@ export default function ExecutionRecords() {
 
       {openDrawer && (
         <>
-          <div className="fixed inset-0 z-30 bg-black/20" onClick={() => setOpenDrawer(null)} />
+          <button type="button" aria-label="关闭执行详情" className="fixed inset-0 z-30 bg-black/20" onClick={() => setOpenDrawer(null)} />
           <ExecutionDrawer execId={openDrawer} onClose={() => setOpenDrawer(null)} />
         </>
       )}

@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from html import unescape
 from typing import Any
-from urllib.parse import parse_qs, urlencode, urlparse, urlunparse
+from urllib.parse import parse_qs, unquote, urlencode, urljoin, urlparse, urlunparse
 
 
-COMMENT_ID_QUERY_KEYS = ("comment_id", "reply_comment_id", "story_fbid")
+COMMENT_ID_QUERY_KEYS = ("comment_id", "reply_comment_id", "comment_id_to_reply", "story_fbid")
+FACEBOOK_HOST_SUFFIX = ".facebook.com"
+FACEBOOK_REDIRECT_PATHS = {"/l.php", "/flx/warn/"}
 
 
 @dataclass(frozen=True)
@@ -17,10 +20,11 @@ class CommentLinkResolution:
 
 
 def extract_comment_id_from_url(url: str | None) -> str | None:
-    if not url:
+    normalized = normalize_comment_permalink(url)
+    if not normalized:
         return None
     try:
-        parsed = urlparse(url)
+        parsed = urlparse(normalized)
     except Exception:
         return None
     query = parse_qs(parsed.query)
@@ -33,15 +37,42 @@ def extract_comment_id_from_url(url: str | None) -> str | None:
     return None
 
 
-def is_comment_permalink(url: str | None) -> bool:
+def normalize_comment_permalink(url: str | None, *, base_url: str | None = None) -> str | None:
     if not url:
+        return None
+    candidate = unescape(str(url).strip())
+    if not candidate or candidate.startswith(("#", "javascript:", "mailto:")):
+        return None
+    if base_url:
+        candidate = urljoin(base_url, candidate)
+    elif candidate.startswith("/"):
+        candidate = urljoin("https://www.facebook.com", candidate)
+    try:
+        parsed = urlparse(candidate)
+    except Exception:
+        return None
+    if not parsed.scheme or not parsed.netloc:
+        return None
+
+    host = (parsed.hostname or "").lower()
+    if host == "facebook.com" or host.endswith(FACEBOOK_HOST_SUFFIX):
+        if parsed.path.lower() in FACEBOOK_REDIRECT_PATHS:
+            redirect = (parse_qs(parsed.query).get("u") or [None])[0]
+            if redirect:
+                return normalize_comment_permalink(unquote(redirect))
+        return urlunparse((parsed.scheme, parsed.netloc, parsed.path, parsed.params, parsed.query, ""))
+    return None
+
+
+def is_comment_permalink(url: str | None) -> bool:
+    normalized = normalize_comment_permalink(url)
+    if not normalized:
         return False
-    lowered = url.lower()
-    if "permalink.php" in lowered:
+    parsed = urlparse(normalized)
+    query = parse_qs(parsed.query)
+    if parsed.path.lower().endswith("/permalink.php"):
         return True
-    if any(f"{key}=" in lowered for key in COMMENT_ID_QUERY_KEYS):
-        return True
-    return False
+    return any(query.get(key) for key in COMMENT_ID_QUERY_KEYS)
 
 
 def extract_comment_permalink_from_node(node: Any) -> str | None:
@@ -51,7 +82,12 @@ def extract_comment_permalink_from_node(node: Any) -> str | None:
     if not links:
         return None
 
-    normalized = [url for link in links if isinstance((url := _link_url(link)), str)]
+    base_url = _node_base_url(node)
+    normalized = [
+        url
+        for link in links
+        if (url := normalize_comment_permalink(_link_url(link), base_url=base_url)) is not None
+    ]
     candidates = [url for url in normalized if is_comment_permalink(url)]
     if not candidates:
         return None
@@ -59,7 +95,7 @@ def extract_comment_permalink_from_node(node: Any) -> str | None:
     with_comment_id = [
         url
         for url in candidates
-        if "comment_id=" in url.lower() or "reply_comment_id=" in url.lower()
+        if any((parse_qs(urlparse(url).query).get(key) or []) for key in COMMENT_ID_QUERY_KEYS[:3])
     ]
     return (with_comment_id or candidates)[0]
 
@@ -69,8 +105,9 @@ def build_direct_comment_url(
     comment_id: str | None,
     comment_url: str | None = None,
 ) -> str | None:
-    if is_comment_permalink(comment_url):
-        return comment_url
+    normalized_comment_url = normalize_comment_permalink(comment_url)
+    if is_comment_permalink(normalized_comment_url):
+        return normalized_comment_url
     if not source_content_url or not comment_id:
         return None
     try:
@@ -102,7 +139,9 @@ def resolve_comment_links(
     direct_comment_url: str | None = None,
     comment_id_source: str | None = None,
 ) -> CommentLinkResolution:
-    clean_comment_url = comment_url if is_comment_permalink(comment_url) else None
+    clean_comment_url = normalize_comment_permalink(comment_url)
+    if not is_comment_permalink(clean_comment_url):
+        clean_comment_url = None
     permalink_comment_id = extract_comment_id_from_url(clean_comment_url)
     node_id = _clean_id(node_comment_id)
     author_comment_id = extract_comment_id_from_url(author_url)
@@ -123,7 +162,9 @@ def resolve_comment_links(
         resolved_id = None
         resolved_source = "unknown"
 
-    resolved_direct = direct_comment_url if is_comment_permalink(direct_comment_url) else None
+    resolved_direct = normalize_comment_permalink(direct_comment_url)
+    if not is_comment_permalink(resolved_direct):
+        resolved_direct = None
     if resolved_direct is None:
         resolved_direct = build_direct_comment_url(
             source_content_url,
@@ -149,6 +190,18 @@ def _link_url(link: Any) -> str | None:
         value = link.get("href") or link.get("url")
         return str(value) if value else None
     value = getattr(link, "href", None) or getattr(link, "url", None)
+    return str(value) if value else None
+
+
+def _node_base_url(node: Any) -> str | None:
+    if isinstance(node, dict):
+        value = node.get("base_url") or node.get("page_url") or node.get("source_content_url")
+    else:
+        value = (
+            getattr(node, "base_url", None)
+            or getattr(node, "page_url", None)
+            or getattr(node, "source_content_url", None)
+        )
     return str(value) if value else None
 
 

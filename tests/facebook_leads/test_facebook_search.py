@@ -2,6 +2,7 @@ import asyncio
 
 from src.facebook_leads.facebook.search import (
     build_facebook_search_url,
+    canonical_facebook_content_identity,
     classify_facebook_content_url,
     discover_content_candidates,
     is_candidate_content_url,
@@ -59,6 +60,47 @@ def test_facebook_url_classification_covers_common_formats():
         assert normalized is not None
         assert classify_facebook_content_url(normalized) == expected
         assert is_candidate_content_url(normalized)
+
+
+def test_canonical_content_identity_unifies_common_aliases():
+    aliases = [
+        "https://www.facebook.com/acme/posts/123?tracking=drop",
+        "https://m.facebook.com/groups/9/posts/123/",
+        "https://www.facebook.com/permalink.php?story_fbid=123&id=45",
+    ]
+
+    assert {canonical_facebook_content_identity(url) for url in aliases} == {"facebook:123"}
+
+
+def test_content_discovery_deduplicates_alias_urls_by_identity():
+    page = FakePage([[
+        {"href": "https://www.facebook.com/acme/posts/123", "text": "First"},
+        {"href": "https://www.facebook.com/permalink.php?story_fbid=123&id=45", "text": "Alias"},
+        {"href": "https://www.facebook.com/reel/456", "text": "Second"},
+    ]])
+
+    result = asyncio.run(discover_content_candidates(page, limit=10, max_scrolls=0))
+
+    assert [item.url for item in result] == [
+        "https://www.facebook.com/acme/posts/123",
+        "https://www.facebook.com/reel/456",
+    ]
+
+
+def test_content_discovery_excludes_identities_seen_by_prior_keyword():
+    page = FakePage([[
+        {"href": "https://www.facebook.com/permalink.php?story_fbid=123&id=45", "text": "Prior result"},
+        {"href": "https://www.facebook.com/reel/456", "text": "New result"},
+    ]])
+
+    result = asyncio.run(discover_content_candidates(
+        page,
+        limit=10,
+        max_scrolls=0,
+        excluded_identities={"facebook:123"},
+    ))
+
+    assert [item.url for item in result] == ["https://www.facebook.com/reel/456"]
 
 
 def test_non_facebook_url_is_not_candidate():

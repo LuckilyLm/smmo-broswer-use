@@ -20,8 +20,9 @@ import { Skeleton } from "../components/ui/skeleton";
 const tabs = ["概览", "租户", "用户", "运行时与队列", "系统健康"] as const;
 type Tab = (typeof tabs)[number];
 
+const systemDateTimeFormatter = new Intl.DateTimeFormat("zh-CN", { dateStyle: "medium", timeStyle: "short" });
 const dateTime = (value?: string | null) =>
-  value ? new Intl.DateTimeFormat("zh-CN", { dateStyle: "medium", timeStyle: "short" }).format(new Date(value)) : "—";
+  value ? systemDateTimeFormatter.format(new Date(value)) : "—";
 const errorMessage = (error: unknown) => (error instanceof Error ? error.message : "请求系统管理数据时发生错误");
 const planName = (tenant: Tenant) => tenant.plan?.name || tenant.plan?.code || "未配置";
 
@@ -82,7 +83,7 @@ export default function SystemAdmin() {
 
   return <div className="flex min-h-full flex-col gap-4 p-4 md:p-6">
     <header className="flex items-center gap-2"><Shield className="text-primary" size={20} /><div><h1 className="text-xl font-semibold">系统管理</h1><p className="text-xs text-muted-foreground">来自系统管理 API 的实时数据</p></div></header>
-    <nav aria-label="系统管理区域" className="flex overflow-x-auto border-b">{tabs.map((tab) => <button className={`shrink-0 border-b-2 px-4 py-2.5 text-sm font-medium ${activeTab === tab ? 'border-primary text-primary' : 'border-transparent text-muted-foreground'}`} key={tab} onClick={() => setActiveTab(tab)}>{tab}</button>)}</nav>
+    <nav aria-label="系统管理区域" className="flex overflow-x-auto border-b">{tabs.map((tab) => <button type="button" className={`shrink-0 border-b-2 px-4 py-2.5 text-sm font-medium ${activeTab === tab ? 'border-primary text-primary' : 'border-transparent text-muted-foreground'}`} key={tab} onClick={() => setActiveTab(tab)}>{tab}</button>)}</nav>
 
     {activeTab === "概览" && (usage.isLoading ? <LoadingState /> : usage.isError ? <ErrorState description={errorMessage(usage.error)} onRetry={() => usage.refetch()} /> : usage.data && <div className="grid grid-cols-2 gap-3 lg:grid-cols-5"><MetricCard label="租户" value={usage.data.tenants} icon={<Database size={16} />} /><MetricCard label="用户" value={usage.data.users} icon={<Users size={16} />} /><MetricCard label="执行" value={usage.data.executions} icon={<PlayCircle size={16} />} /><MetricCard label="Token" value={usage.data.tokens.toLocaleString()} icon={<Activity size={16} />} /><MetricCard label="在线 Worker" value={usage.data.worker_health} icon={<Server size={16} />} accent={usage.data.worker_health ? "success" : "warning"} /></div>)}
 

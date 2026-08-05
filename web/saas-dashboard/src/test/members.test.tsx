@@ -37,7 +37,9 @@ describe('members page', () => {
     expect(await screen.findAllByText('Alice')).not.toHaveLength(0)
     expect(screen.getByText('pending@test.com')).toBeInTheDocument()
     fireEvent.click(screen.getByRole('button', { name: '邀请成员' }))
-    fireEvent.change(screen.getByPlaceholderText('member@company.com'), { target: { value: 'new@test.com' } })
+    expect(screen.getByRole('dialog', { name: '邀请成员' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: '关闭邀请面板' })).toHaveAttribute('type', 'button')
+    fireEvent.change(screen.getByRole('textbox', { name: /邮箱地址/ }), { target: { value: 'new@test.com' } })
     fireEvent.click(screen.getByRole('button', { name: /发送邀请/ }))
 
     await waitFor(() => expect(calls.some(([path, init]) => path.endsWith('/api/tenant/invitations') && init?.method === 'POST')).toBe(true))

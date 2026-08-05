@@ -28,6 +28,7 @@ async def run_readonly_scan(
     current_page_only: bool = False,
     incremental_output_path: str | Path | None = None,
     resume_payload: dict[str, Any] | None = None,
+    excluded_content_identities: set[str] | frozenset[str] | None = None,
 ) -> FacebookScanResult:
     started = time.perf_counter()
     timing: dict[str, Any] = {}
@@ -96,7 +97,13 @@ async def run_readonly_scan(
                 raise ValueError("--keyword is required unless --current-page-only is used")
             stage = "search"
             t0 = time.perf_counter()
-            discovered_contents = await search_facebook_contents(page, keyword, limit=content_limit, max_scrolls=max_scrolls)
+            search_kwargs = {
+                "limit": content_limit,
+                "max_scrolls": max_scrolls,
+            }
+            if excluded_content_identities:
+                search_kwargs["excluded_identities"] = excluded_content_identities
+            discovered_contents = await search_facebook_contents(page, keyword, **search_kwargs)
             timing["search_ms"] = _elapsed_ms(t0)
             timing["content_discovery_ms"] = timing["search_ms"]
         diagnostics["discovered_contents_count"] = len(discovered_contents)

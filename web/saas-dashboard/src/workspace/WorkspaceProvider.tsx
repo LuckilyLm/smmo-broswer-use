@@ -1,31 +1,9 @@
-import { createContext, useContext, useState, useCallback, useEffect, type ReactNode } from "react";
+import { useState, useCallback, useEffect, useMemo, useRef, type ReactNode } from "react";
 import { apiGet, apiPost } from "../api/client";
 import { useAuth } from "../auth/AuthProvider";
+import { WorkspaceContext, type Workspace, type WorkspaceContextValue } from "./WorkspaceContext";
 
-export interface Workspace {
-  id: string;
-  name: string;
-  slug: string;
-  status: string;
-  created_at: string;
-  updated_at: string;
-}
-
-interface WorkspaceContextValue {
-  currentTenant: Workspace | null;
-  availableTenants: Workspace[];
-  isLoading: boolean;
-  switchTenant: (tenantId: string) => Promise<void>;
-  refreshTenants: () => Promise<void>;
-}
-
-export const WorkspaceContext = createContext<WorkspaceContextValue | null>(null);
-
-export function useWorkspace(): WorkspaceContextValue {
-  const ctx = useContext(WorkspaceContext);
-  if (!ctx) throw new Error("useWorkspace must be used within WorkspaceProvider");
-  return ctx;
-}
+export type { Workspace } from "./WorkspaceContext";
 
 interface WorkspaceProviderProps {
   children: ReactNode;
@@ -36,16 +14,20 @@ export function WorkspaceProvider({ children }: WorkspaceProviderProps) {
   const [currentTenant, setCurrentTenant] = useState<Workspace | null>(null);
   const [availableTenants, setAvailableTenants] = useState<Workspace[]>([]);
   const [isLoading, setIsLoading] = useState(false);
+  const refreshRequestRef = useRef(0);
 
   const refreshTenants = useCallback(async () => {
+    const requestId = ++refreshRequestRef.current;
     if (status !== "authenticated") {
       setCurrentTenant(null);
       setAvailableTenants([]);
+      setIsLoading(false);
       return;
     }
     setIsLoading(true);
     try {
       const data = await apiGet<Workspace[]>("/api/tenants");
+      if (requestId !== refreshRequestRef.current) return;
       const tenants = Array.isArray(data) ? data : [];
       setAvailableTenants(tenants);
       // Set current from auth context if available
@@ -63,7 +45,7 @@ export function WorkspaceProvider({ children }: WorkspaceProviderProps) {
     } catch {
       // Silently fail
     } finally {
-      setIsLoading(false);
+      if (requestId === refreshRequestRef.current) setIsLoading(false);
     }
   }, [status, tenant]);
 
@@ -84,13 +66,13 @@ export function WorkspaceProvider({ children }: WorkspaceProviderProps) {
     }
   }, []);
 
-  const value: WorkspaceContextValue = {
+  const value = useMemo<WorkspaceContextValue>(() => ({
     currentTenant,
     availableTenants,
     isLoading,
     switchTenant,
     refreshTenants,
-  };
+  }), [currentTenant, availableTenants, isLoading, switchTenant, refreshTenants]);
 
   return <WorkspaceContext.Provider value={value}>{children}</WorkspaceContext.Provider>;
 }

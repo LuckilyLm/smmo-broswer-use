@@ -40,6 +40,27 @@ def normalize_facebook_url(url: str) -> str | None:
     return urlunparse(("https", host, path, "", query, ""))
 
 
+def canonical_facebook_content_identity(url: str | None) -> str | None:
+    """Return a stable identity shared by common URLs for the same Facebook content."""
+    normalized = normalize_facebook_url(url or "")
+    if not normalized:
+        return None
+    parsed = urlparse(normalized)
+    query = dict(parse_qsl(parsed.query))
+    for key in ("story_fbid", "fbid", "v"):
+        if query.get(key):
+            return f"facebook:{query[key]}"
+
+    segments = [segment for segment in parsed.path.split("/") if segment]
+    lowered = [segment.lower() for segment in segments]
+    for marker in ("posts", "reel", "reels", "videos"):
+        if marker in lowered:
+            index = lowered.index(marker)
+            if index + 1 < len(segments) and segments[index + 1]:
+                return f"facebook:{segments[index + 1]}"
+    return f"facebook-url:{normalized}"
+
+
 def classify_facebook_content_url(url: str) -> FacebookContentType:
     parsed = urlparse(url)
     path = parsed.path.lower()
@@ -72,6 +93,7 @@ async def search_facebook_contents(
     keyword: str,
     limit: int = 10,
     max_scrolls: int = 5,
+    excluded_identities: set[str] | frozenset[str] | None = None,
 ) -> list[FacebookContentCandidate]:
     await page.goto(build_facebook_search_url(keyword), wait_until="domcontentloaded", timeout=30000)
     await _wait_for_candidate_anchors(page)
@@ -80,6 +102,7 @@ async def search_facebook_contents(
         limit=limit,
         max_scrolls=max_scrolls,
         discovered_from=getattr(page, "url", None),
+        excluded_identities=excluded_identities,
     )
     return candidates[:limit]
 
@@ -89,17 +112,19 @@ async def discover_content_candidates(
     limit: int = 10,
     max_scrolls: int = 5,
     discovered_from: str | None = None,
+    excluded_identities: set[str] | frozenset[str] | None = None,
 ) -> list[FacebookContentCandidate]:
     candidates: list[FacebookContentCandidate] = []
-    seen: set[str] = set()
+    seen: set[str] = set(excluded_identities or ())
     for scroll_index in range(max(0, max_scrolls) + 1):
         for anchor_index, anchor in enumerate(await _extract_anchor_records(page)):
             if _is_search_noise_anchor(anchor):
                 continue
             normalized = normalize_facebook_url(anchor.href)
-            if not normalized or normalized in seen or not is_candidate_content_url(normalized):
+            identity = canonical_facebook_content_identity(normalized)
+            if not identity or identity in seen or not is_candidate_content_url(normalized):
                 continue
-            seen.add(normalized)
+            seen.add(identity)
             candidates.append(
                 FacebookContentCandidate(
                     url=normalized,

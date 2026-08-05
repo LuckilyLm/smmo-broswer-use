@@ -67,6 +67,7 @@ async def run_cli_scan(args: argparse.Namespace) -> dict:
         current_page_only=args.current_page_only,
         incremental_output_path=incremental_output_path,
         resume_payload=resume_payload,
+        excluded_content_identities=set(getattr(args, "excluded_content_identities", ()) or ()),
     )
     payload = result.to_dict()
     payload["timing"]["browser_init_ms"] = browser_init_ms

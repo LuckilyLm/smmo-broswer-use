@@ -990,8 +990,8 @@ def create_app(*, database_url: str | None = None, service: SaaSService | None =
         return svc.cancel_reply_plan(context, plan_id)
 
     @campaigns_router.post("/api/reply-plans/{plan_id}/execute")
-    def execute_reply_plan(plan_id: str, context: TenantContext = Depends(require_context), svc: SaaSService = Depends(get_service)) -> dict[str, Any]:
-        return svc.execute_reply_plan(context, plan_id)
+    async def execute_reply_plan(plan_id: str, context: TenantContext = Depends(require_context), svc: SaaSService = Depends(get_service)) -> dict[str, Any]:
+        return await svc.execute_reply_plan(context, plan_id)
 
     @campaigns_router.get("/api/reply-records")
     def list_reply_records(

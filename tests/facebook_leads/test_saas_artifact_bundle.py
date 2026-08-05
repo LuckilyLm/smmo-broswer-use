@@ -134,6 +134,120 @@ def test_execution_report_localizes_internal_runtime_and_campaign_values(tmp_pat
         assert internal not in report_html
 
 
+
+def test_execution_report_separates_source_and_direct_comment_links_and_scopes_leads(tmp_path):
+    root = tmp_path / "execution"
+    source_url = "https://www.facebook.com/reel/1"
+    direct_url = f"{source_url}?comment_id=comment-1"
+    paths = write_execution_bundle(
+        root,
+        tenant_id="tenant_1",
+        execution={
+            "id": "exec_1",
+            "campaign_id": "camp_1",
+            "status": "completed",
+            "send_disabled": True,
+            "started_at": "2026-08-03T10:00:00Z",
+            "finished_at": "2026-08-03T10:30:00Z",
+        },
+        keywords=[{"keyword": "steel supplier", "status": "completed"}],
+        leads=[
+            {
+                "author_name": "Current lead",
+                "comment_text": "Current comment",
+                "source_content_url": source_url,
+                "direct_comment_url": direct_url,
+                "discovered_at": "2026-08-03T10:10:00Z",
+            },
+            {
+                "author_name": "Previous lead",
+                "comment_text": "Old comment",
+                "source_content_url": "https://www.facebook.com/reel/old",
+                "direct_comment_url": "https://www.facebook.com/reel/old?comment_id=old",
+                "discovered_at": "2026-08-02T10:10:00Z",
+            },
+        ],
+    )
+
+    payload = json.loads(paths["execution_report_json"].read_text(encoding="utf-8"))
+    assert [lead["author_name"] for lead in payload["leads"]] == ["Current lead"]
+    assert payload["leads"][0]["source_content_url"] == source_url
+    assert payload["leads"][0]["direct_comment_url"] == direct_url
+    assert payload["summary"]["persisted_leads"] == 1
+
+    report_html = paths["execution_report_html"].read_text(encoding="utf-8")
+    assert "来源内容链接" in report_html
+    assert "评论直达链接" in report_html
+    assert f'href="{source_url}"' in report_html
+    assert f'href="{direct_url.replace("&", "&amp;")}"' in report_html
+    assert "Previous lead" not in report_html
+
+
+
+
+def test_execution_report_formats_generated_time_in_tenant_timezone(tmp_path, monkeypatch):
+    class FixedDateTime:
+        @classmethod
+        def now(cls, tz=None):
+            from datetime import datetime, timezone
+            return datetime(2026, 8, 3, 1, 21, tzinfo=timezone.utc)
+
+        @classmethod
+        def fromisoformat(cls, value):
+            from datetime import datetime
+            return datetime.fromisoformat(value)
+
+    monkeypatch.setattr("src.facebook_leads.saas.artifact_bundle.datetime", FixedDateTime)
+    paths = write_execution_bundle(
+        tmp_path / "execution",
+        tenant_id="tenant_1",
+        execution={"id": "exec_1", "status": "completed", "send_disabled": True, "timezone": "Asia/Shanghai"},
+        keywords=[],
+        leads=[],
+    )
+
+    payload = json.loads(paths["execution_report_json"].read_text(encoding="utf-8"))
+    report_html = paths["execution_report_html"].read_text(encoding="utf-8")
+    assert payload["generated_at"] == "2026-08-03T01:21:00+00:00"
+    assert payload["timezone"] == "Asia/Shanghai"
+    assert "2026-08-03 09:21 Asia/Shanghai" in report_html
+
+
+def test_execution_report_distinguishes_token_usage_statuses(tmp_path):
+    paths = write_execution_bundle(
+        tmp_path / "execution",
+        tenant_id="tenant_1",
+        execution={"id": "exec_1", "status": "completed", "send_disabled": True},
+        keywords=[
+            {"keyword": "no ai", "status": "completed", "llm_usage_status": "not_called", "request_count": 0},
+            {"keyword": "known", "status": "completed", "llm_usage_status": "recorded", "request_count": 1, "model": "gpt-test", "prompt_tokens": 100, "completion_tokens": 20, "total_tokens": 120},
+            {"keyword": "unknown", "status": "completed", "llm_usage_status": "unknown_usage", "request_count": 1, "model": "gpt-test"},
+        ],
+        leads=[],
+    )
+
+    payload = json.loads(paths["execution_report_json"].read_text(encoding="utf-8"))
+    report_html = paths["execution_report_html"].read_text(encoding="utf-8")
+    assert payload["summary"]["total_tokens"] == 120
+    assert payload["summary"]["llm_request_count"] == 2
+    assert "未调用" in report_html
+    assert "已记录" in report_html
+    assert "未返回" in report_html
+    assert "Token 按实际触发大模型的关键词归属" in report_html
+
+
+def test_execution_report_falls_back_to_utc_for_invalid_timezone(tmp_path):
+    paths = write_execution_bundle(
+        tmp_path / "execution",
+        tenant_id="tenant_1",
+        execution={"id": "exec_1", "status": "completed", "send_disabled": True, "timezone": "invalid/zone"},
+        keywords=[],
+        leads=[],
+    )
+    payload = json.loads(paths["execution_report_json"].read_text(encoding="utf-8"))
+    assert payload["timezone"] == "UTC"
+
+
 def test_upload_execution_artifacts_disabled_without_configuration(tmp_path):
     result = upload_execution_artifacts(
         tmp_path,

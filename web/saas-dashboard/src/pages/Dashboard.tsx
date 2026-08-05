@@ -1,7 +1,6 @@
-import { useState } from 'react'
+import { lazy, Suspense, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { useTranslation } from 'react-i18next'
-import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, PieChart, Pie, Cell } from 'recharts'
 import { Megaphone, Users, MessageSquare, UserPlus, Star, CheckCircle, Reply, XCircle, ChevronRight, RefreshCw } from 'lucide-react'
 import { useDashboardSummary, type DashboardRange } from '../api/dashboard'
 import PageContainer from '../components/layout/PageContainer'
@@ -12,6 +11,9 @@ import { EmptyState, ErrorState } from '../components/ui/PageState'
 import { Skeleton } from '@/components/ui/skeleton'
 import { Button } from '@/components/ui/button'
 import { formatCampaignStatus, formatExecutionStatus, formatLoginStatus } from '../utils/formatters'
+
+const DashboardLeadTrendChart = lazy(() => import('../components/charts/DashboardCharts').then((module) => ({ default: module.DashboardLeadTrendChart })))
+const DashboardIntentChart = lazy(() => import('../components/charts/DashboardCharts').then((module) => ({ default: module.DashboardIntentChart })))
 
 const platformColors: Record<string, string> = {
   facebook: '#1877f2', instagram: '#e1306c', tiktok: '#010101', x: '#1da1f2', youtube: '#ff0000', twitter: '#1da1f2',
@@ -42,7 +44,7 @@ export default function Dashboard() {
         </div>
         <div className="flex items-center gap-2">
           {isFetching && <span className="hidden text-xs text-muted-foreground sm:inline">正在刷新…</span>}
-          <select className="h-10 rounded-lg border bg-card px-3 text-sm outline-none" value={range} onChange={(event) => setRange(event.target.value as DashboardRange)}>
+          <select aria-label="仪表盘时间范围" className="h-10 rounded-lg border bg-card px-3 text-sm outline-none" value={range} onChange={(event) => setRange(event.target.value as DashboardRange)}>
             <option value="7d">最近 7 天</option>
             <option value="14d">最近 14 天</option>
             <option value="30d">最近 30 天</option>
@@ -68,16 +70,9 @@ export default function Dashboard() {
         <section className="rounded-xl border bg-card p-4 md:col-span-2">
           <SectionTitle title="线索趋势" subtitle={`最近 ${range.replace('d', '')} 天`} />
           {metrics.lead_trend.length === 0 ? <EmptyState compact title="暂无趋势数据" description="产生线索或扫描记录后会显示趋势。" /> : (
-            <ResponsiveContainer width="100%" height={180}>
-              <LineChart data={metrics.lead_trend} margin={{ top: 8, right: 8, bottom: 0, left: -18 }}>
-                <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" vertical={false} />
-                <XAxis dataKey="day" tick={{ fontSize: 11, fill: 'var(--muted-foreground)' }} axisLine={false} tickLine={false} />
-                <YAxis tick={{ fontSize: 11, fill: 'var(--muted-foreground)' }} axisLine={false} tickLine={false} />
-                <Tooltip wrapperStyle={{ maxWidth: 'calc(100vw - 32px)' }} contentStyle={{ fontSize: 12, border: '1px solid var(--border)', borderRadius: 8 }} />
-                <Line type="monotone" dataKey="leads" stroke="var(--primary)" strokeWidth={2} dot={false} name="线索" />
-                <Line type="monotone" dataKey="scanned" stroke="var(--muted-foreground)" strokeWidth={1.5} dot={false} name="扫描量" strokeDasharray="4 2" />
-              </LineChart>
-            </ResponsiveContainer>
+            <Suspense fallback={<ChartSkeleton heightClass="h-[180px]" />}>
+              <DashboardLeadTrendChart data={metrics.lead_trend} />
+            </Suspense>
           )}
         </section>
 
@@ -85,9 +80,9 @@ export default function Dashboard() {
           <SectionTitle title="线索意向分布" subtitle={`共 ${metrics.intent_distribution.reduce((sum, item) => sum + item.value, 0)} 条`} />
           {metrics.intent_distribution.length === 0 ? <EmptyState compact title="暂无意向数据" /> : (
             <>
-              <ResponsiveContainer width="100%" height={120}>
-                <PieChart><Pie data={metrics.intent_distribution} cx="50%" cy="50%" innerRadius={30} outerRadius={52} dataKey="value" paddingAngle={2}>{metrics.intent_distribution.map((entry) => <Cell key={entry.name} fill={entry.color} />)}</Pie><Tooltip /></PieChart>
-              </ResponsiveContainer>
+              <Suspense fallback={<ChartSkeleton heightClass="h-[120px]" />}>
+                <DashboardIntentChart data={metrics.intent_distribution} />
+              </Suspense>
               <div className="mt-2 flex flex-wrap gap-x-4 gap-y-2">
                 {metrics.intent_distribution.map((item) => <div key={item.name} className="flex min-w-24 flex-1 items-center justify-between gap-2 text-xs"><span className="flex items-center gap-1.5 text-muted-foreground"><span className="h-2 w-2 rounded-full" style={{ background: item.color }} />{item.name}</span><strong>{item.value}</strong></div>)}
               </div>
@@ -135,6 +130,7 @@ export default function Dashboard() {
   )
 }
 
+function ChartSkeleton({ heightClass }: { heightClass: string }) { return <Skeleton data-testid="chart-loading-skeleton" className={`w-full ${heightClass}`} /> }
 function SectionTitle({ title, subtitle }: { title: string; subtitle?: string }) { return <div className="mb-4"><h2 className="text-sm font-semibold">{title}</h2>{subtitle && <p className="mt-0.5 text-xs text-muted-foreground">{subtitle}</p>}</div> }
-function PanelHeader({ title, action, onAction }: { title: string; action: string; onAction: () => void }) { return <div className="flex items-center justify-between border-b px-4 py-3"><h2 className="text-sm font-semibold">{title}</h2><button className="flex min-h-9 items-center gap-1 text-xs font-medium text-primary hover:underline" onClick={onAction}>{action}<ChevronRight className="h-3 w-3" /></button></div> }
+function PanelHeader({ title, action, onAction }: { title: string; action: string; onAction: () => void }) { return <div className="flex items-center justify-between border-b px-4 py-3"><h2 className="text-sm font-semibold">{title}</h2><button type="button" className="flex min-h-9 items-center gap-1 text-xs font-medium text-primary hover:underline" onClick={onAction}>{action}<ChevronRight className="h-3 w-3" /></button></div> }
 function DashboardSkeleton() { return <PageContainer maxWidth="dashboard" className="flex flex-col gap-5"><div className="flex justify-between"><div><Skeleton className="h-8 w-32" /><Skeleton className="mt-2 h-4 w-72" /></div><Skeleton className="h-10 w-36" /></div><div className="grid grid-cols-2 gap-3 md:grid-cols-4 2xl:grid-cols-8">{Array.from({ length: 8 }).map((_, index) => <Skeleton key={index} className="h-24" />)}</div><div className="grid grid-cols-1 gap-4 md:grid-cols-3"><Skeleton className="h-56 md:col-span-2" /><Skeleton className="h-56" /></div><Skeleton className="h-72" /><Skeleton className="h-56" /></PageContainer> }

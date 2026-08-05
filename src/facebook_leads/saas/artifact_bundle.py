@@ -5,6 +5,7 @@ import json
 import mimetypes
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 from pathlib import Path
 from typing import Any
 
@@ -38,13 +39,16 @@ def write_execution_bundle(
 ) -> dict[str, Path]:
     root.mkdir(parents=True, exist_ok=True)
     runs = _run_summaries(root)
+    report_leads = _execution_leads(leads, execution, keywords)
+    report_timezone = _safe_timezone_name(execution.get("timezone"))
     payload = {
         "generated_at": datetime.now(timezone.utc).isoformat(),
+        "timezone": report_timezone,
         "tenant_id": tenant_id,
         "execution": execution,
         "keywords": keywords,
-        "summary": _summary(execution, keywords, leads, runs),
-        "leads": leads,
+        "summary": _summary(execution, keywords, report_leads, runs),
+        "leads": report_leads,
         "runs": runs,
         "raw_artifacts": _artifact_index(root),
     }
@@ -155,11 +159,84 @@ def _summary(execution: dict[str, Any], keywords: list[dict[str, Any]], leads: l
         "reply_outcome": reply_outcome,
         "blockage_reasons": blockage_reasons,
         "persisted_leads": len(leads),
-        "prompt_tokens": sum(int(row.get("prompt_tokens") or 0) for row in keywords),
-        "completion_tokens": sum(int(row.get("completion_tokens") or 0) for row in keywords),
-        "total_tokens": sum(int(row.get("total_tokens") or 0) for row in keywords),
+        "prompt_tokens": _sum_known_tokens(keywords, "prompt_tokens"),
+        "completion_tokens": _sum_known_tokens(keywords, "completion_tokens"),
+        "total_tokens": _sum_known_tokens(keywords, "total_tokens"),
+        "llm_request_count": sum(int(row.get("request_count") or 0) for row in keywords),
         "run_count": len(runs),
     }
+
+
+def _sum_known_tokens(rows: list[dict[str, Any]], key: str) -> int | None:
+    values = [int(row[key]) for row in rows if row.get(key) is not None]
+    return sum(values) if values else None
+
+
+def _safe_timezone_name(value: Any) -> str:
+    name = str(value or "UTC").strip() or "UTC"
+    try:
+        ZoneInfo(name)
+    except Exception:
+        return "UTC"
+    return name
+
+
+def _execution_leads(
+    leads: list[dict[str, Any]],
+    execution: dict[str, Any],
+    keywords: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    execution_id = execution.get("id")
+    explicitly_scoped = [lead for lead in leads if lead.get("execution_id") == execution_id]
+    if execution_id and explicitly_scoped:
+        return explicitly_scoped
+
+    execution_started_at = _parse_datetime(execution.get("started_at"))
+    execution_finished_at = _parse_datetime(execution.get("finished_at"))
+    if execution_started_at or execution_finished_at:
+        time_scoped = []
+        for lead in leads:
+            discovered_at = _parse_datetime(lead.get("discovered_at") or lead.get("last_discovered_at"))
+            if discovered_at is None:
+                continue
+            if execution_started_at and discovered_at < execution_started_at:
+                continue
+            if execution_finished_at and discovered_at > execution_finished_at:
+                continue
+            time_scoped.append(lead)
+        return time_scoped
+
+    execution_keywords = {
+        str(row.get("keyword") or "").strip()
+        for row in keywords
+        if str(row.get("keyword") or "").strip()
+    }
+    if execution_keywords:
+        return [
+            lead
+            for lead in leads
+            if execution_keywords.intersection(
+                str(keyword).strip()
+                for keyword in (lead.get("matched_search_keywords") or [])
+                if str(keyword).strip()
+            )
+        ]
+    return leads
+
+
+def _parse_datetime(value: Any) -> datetime | None:
+    if not value:
+        return None
+    if isinstance(value, datetime):
+        parsed = value
+    else:
+        try:
+            parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        except (TypeError, ValueError):
+            return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
 
 
 def _sum_available(runs: list[dict[str, Any]], key: str, *, fallback: Any = None) -> int | None:
@@ -237,7 +314,8 @@ def _render_html(payload: dict[str, Any]) -> str:
     campaign_id = html.escape(str(execution.get("campaign_id") or ""))
     campaign_name = html.escape(str(execution.get("campaign_name") or execution.get("campaign_id") or ""))
     account_name = html.escape(str(execution.get("platform_account_name") or ""))
-    generated_at = html.escape(_format_datetime(payload.get("generated_at")))
+    report_timezone = _safe_timezone_name(payload.get("timezone"))
+    generated_at = html.escape(_format_datetime(payload.get("generated_at"), report_timezone))
     status = html.escape(_zh_value(summary.get("status") or "unknown"))
     send_mode = "安全模式：仅生成计划，未真实发送" if summary.get("send_disabled") else "允许发送"
     reply_outcome = summary.get("reply_outcome") or {}
@@ -324,12 +402,12 @@ section{{background:var(--paper);border:1px solid var(--line);border-radius:8px;
 <section><div class="section-head"><h2>关键结果</h2><div class="section-note">优先展示业务结果，详细数据见下方明细</div></div><div class="kpi-grid">{''.join(_metric(label, value, primary=True) for label, value in primary_cards)}</div><div class="compact-grid">{''.join(_metric(label, value) for label, value in secondary_cards)}</div></section>
 {config_section}
 <div class="two">
-  <section><h2>大模型用量</h2><div class="compact-grid">{''.join(_metric(label, value) for label, value in [('输入 Token', summary.get('prompt_tokens')), ('输出 Token', summary.get('completion_tokens')), ('Token 合计', summary.get('total_tokens'))])}</div></section>
+  <section><h2>大模型用量</h2><div class="compact-grid">{''.join(_metric(label, value) for label, value in [('输入 Token', summary.get('prompt_tokens')), ('输出 Token', summary.get('completion_tokens')), ('Token 合计', summary.get('total_tokens')), ('LLM 调用次数', summary.get('llm_request_count'))])}</div><p class="section-note" style="margin-top:12px">Token 按实际触发大模型的关键词归属；“未调用”表示该关键词没有发生 LLM 请求，“未返回”表示供应商未提供用量。</p></section>
   <section><h2>执行保护</h2><div class="compact-grid">{''.join(_metric(label, value) for label, value in [('发送开关', send_mode), ('运行次数', summary.get('run_count')), ('回复计划结果', reply_outcome.get('status'))])}</div></section>
 </div>
-<section><h2>关键词执行</h2>{_table(keywords, ['keyword','status','discovered_contents','scanned_comments','lead_candidates','prompt_tokens','completion_tokens','total_tokens','error_type'])}</section>
+<section><h2>关键词执行</h2>{_table(keywords, ['keyword','status','discovered_contents','scanned_comments','lead_candidates','llm_usage_status','request_count','model','prompt_tokens','completion_tokens','total_tokens','error_type'])}</section>
 <section><h2>运行明细</h2>{_table(runs, ['keyword','status','login_state','scanned_contents','scanned_comments','lead_candidates','eligible_count','selected_count','reply_outcome','first_content_url'])}</section>
-<section><h2>线索结果</h2>{_table(leads, ['author_name','final_intent_level','llm_confidence','comment_text','source_content_url']) if leads else '<div class="empty">本次没有入库线索。若候选线索大于 0 但入库为 0，请检查置信度阈值、去重规则和发送策略。</div>'}</section>
+<section><h2>线索结果</h2>{_table(leads, ['author_name','final_intent_level','llm_confidence','comment_text','source_content_url','direct_comment_url']) if leads else '<div class="empty">本次没有入库线索。若候选线索大于 0 但入库为 0，请检查置信度阈值、去重规则和发送策略。</div>'}</section>
 </main>
 </body></html>"""
 
@@ -383,6 +461,9 @@ def _zh_label(key: str) -> str:
         "prompt_tokens": "输入 Token",
         "completion_tokens": "输出 Token",
         "total_tokens": "Token 合计",
+        "llm_usage_status": "用量状态",
+        "request_count": "调用次数",
+        "model": "模型",
         "error_type": "错误类型",
         "run_id": "运行编号",
         "login_state": "登录状态",
@@ -392,7 +473,8 @@ def _zh_label(key: str) -> str:
         "final_intent_level": "意向等级",
         "llm_confidence": "大模型置信度",
         "comment_text": "评论内容",
-        "source_content_url": "来源链接",
+        "source_content_url": "来源内容链接",
+        "direct_comment_url": "评论直达链接",
     }
     return labels.get(key, key)
 
@@ -459,7 +541,10 @@ def _zh_value(value: str) -> str:
         "reply_disabled": "回复功能关闭",
         "duplicate": "重复线索",
         "already_replied": "已回复过",
-        "missing_comment_text": "评论内容为空",
+        "missing": "未返回",
+        "not_called": "未调用",
+        "recorded": "已记录",
+        "unknown_usage": "未返回",
         "unknown": "未知",
     }
     return values.get(value, value)
@@ -504,7 +589,7 @@ def _summary_text(summary: dict[str, Any], keywords: list[dict[str, Any]]) -> st
     )
 
 
-def _format_datetime(value: Any) -> str:
+def _format_datetime(value: Any, timezone_name: str = "UTC") -> str:
     if not value:
         return "-"
     text = str(value)
@@ -512,7 +597,10 @@ def _format_datetime(value: Any) -> str:
         parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
     except ValueError:
         return text
-    return parsed.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    zone_name = _safe_timezone_name(timezone_name)
+    return parsed.astimezone(ZoneInfo(zone_name)).strftime(f"%Y-%m-%d %H:%M {zone_name}")
 
 
 def _badge(value: str) -> str:

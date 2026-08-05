@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Any, Awaitable, Callable
 
 from src.facebook_leads.facebook.orchestrator import FacebookLeadsRunConfig, run_facebook_leads_job
+from src.facebook_leads.facebook.search import canonical_facebook_content_identity
 from src.facebook_leads.facebook.target_policy import build_target_policy_config, target_policy_from_env
 
 
@@ -34,6 +35,7 @@ class ProviderRunRequest:
     history_path: str
     runs_root: str
     custom_positive_keywords: tuple[str, ...] = ()
+    excluded_content_identities: frozenset[str] = frozenset()
     run_context: PlatformRunContext | None = None
 
 
@@ -90,6 +92,7 @@ class FacebookProvider(BasePlatformProvider):
                 allowed_source_urls=configured_sources.allowed_source_urls,
             ),
             custom_positive_keywords=request.custom_positive_keywords,
+            excluded_content_identities=request.excluded_content_identities,
         )
         result = await self.runner(config)
         result["send_disabled"] = True

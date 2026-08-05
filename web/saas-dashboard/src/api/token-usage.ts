@@ -3,10 +3,10 @@ import { apiGet } from "./client";
 
 // Raw response from backend
 interface RawTokenUsageSummary {
-  today: number;
-  last_7_days: number;
-  this_month: number;
-  total?: number;
+  today?: number | null;
+  last_7_days?: number | null;
+  this_month?: number | null;
+  total?: number | null;
 }
 
 interface RawTokenUsageDetail {
@@ -27,12 +27,9 @@ interface RawTokenUsageDetail {
 
 // Normalized types for frontend
 export interface TokenUsageSummary {
-  total_tokens_used: number;
-  total_tokens_limit: number;
-  tokens_used_today: number;
-  tokens_used_this_month: number;
-  cost_estimate: number;
-  currency: string;
+  total_tokens_used: number | null;
+  tokens_used_today: number | null;
+  tokens_used_this_month: number | null;
 }
 
 export interface TokenUsageDetail {
@@ -40,17 +37,19 @@ export interface TokenUsageDetail {
   campaign_id?: string;
   execution_id?: string;
   operation: string;
-  prompt_tokens: number;
-  completion_tokens: number;
-  tokens_used: number;
+  prompt_tokens: number | null;
+  completion_tokens: number | null;
+  tokens_used: number | null;
+  request_count: number;
   model: string;
   cost: number | null;
   created_at: string;
 }
 
 function normalizeDetail(raw: RawTokenUsageDetail): TokenUsageDetail {
-  const prompt = raw.prompt_tokens || 0;
-  const completion = raw.completion_tokens || 0;
+  const prompt = raw.prompt_tokens ?? null;
+  const completion = raw.completion_tokens ?? null;
+  const derivedTotal = prompt != null && completion != null ? prompt + completion : null;
   return {
     id: raw.id,
     campaign_id: raw.campaign_id,
@@ -58,7 +57,8 @@ function normalizeDetail(raw: RawTokenUsageDetail): TokenUsageDetail {
     operation: raw.operation || "lead_detection",
     prompt_tokens: prompt,
     completion_tokens: completion,
-    tokens_used: raw.total_tokens ?? raw.tokens_used ?? prompt + completion,
+    tokens_used: raw.total_tokens ?? raw.tokens_used ?? derivedTotal,
+    request_count: raw.request_count ?? 1,
     model: raw.model,
     cost: raw.estimated_cost ?? raw.cost ?? null,
     created_at: raw.created_at,
@@ -67,12 +67,9 @@ function normalizeDetail(raw: RawTokenUsageDetail): TokenUsageDetail {
 
 function normalizeSummary(raw: RawTokenUsageSummary): TokenUsageSummary {
   return {
-    total_tokens_used: raw.total ?? raw.last_7_days ?? raw.this_month ?? raw.today ?? 0,
-    total_tokens_limit: 100000, // Default limit, could come from tenant quota
-    tokens_used_today: raw.today || 0,
-    tokens_used_this_month: raw.this_month || 0,
-    cost_estimate: 0, // Backend doesn't return cost yet
-    currency: "USD",
+    total_tokens_used: raw.total ?? raw.last_7_days ?? raw.this_month ?? raw.today ?? null,
+    tokens_used_today: raw.today ?? null,
+    tokens_used_this_month: raw.this_month ?? null,
   };
 }
 
